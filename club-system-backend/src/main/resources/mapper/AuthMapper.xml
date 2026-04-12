@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.bistu.clubsystembackend.mapper.AuthMapper">
+
+    <select id="findUserByUsername" resultType="com.bistu.clubsystembackend.entity.AuthUser">
+        SELECT id, username, password_hash, real_name, status, last_login_at, created_at, updated_at, is_deleted
+        FROM `user`
+        WHERE username = #{username}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="countUserByUsername" resultType="long">
+        SELECT COUNT(1)
+        FROM `user`
+        WHERE username = #{username}
+          AND is_deleted = 0
+    </select>
+
+    <insert id="insertUser" parameterType="com.bistu.clubsystembackend.entity.AuthUser">
+        INSERT INTO `user` (
+            id, username, password_hash, real_name, status, created_at, updated_at, is_deleted
+        ) VALUES (
+            #{id}, #{username}, #{passwordHash}, #{realName}, #{status}, #{createdAt}, #{updatedAt}, 0
+        )
+    </insert>
+
+    <select id="findRoleIdByCode" resultType="long">
+        SELECT id
+        FROM `role`
+        WHERE role_code = #{roleCode}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <insert id="insertRole">
+        INSERT INTO `role` (
+            id, role_code, role_name, status, created_at, updated_at, is_deleted
+        ) VALUES (
+            #{id}, #{roleCode}, #{roleName}, 1, #{createdAt}, #{updatedAt}, 0
+        )
+    </insert>
+
+    <insert id="insertUserRole">
+        INSERT INTO `user_role` (
+            id, user_id, role_id, status, created_at, updated_at, is_deleted
+        ) VALUES (
+            #{id}, #{userId}, #{roleId}, 1, #{createdAt}, #{updatedAt}, 0
+        )
+    </insert>
+
+    <select id="findPrimaryRoleCode" resultType="string">
+        SELECT r.role_code
+        FROM `user_role` ur
+        JOIN `role` r ON ur.role_id = r.id
+        WHERE ur.user_id = #{userId}
+          AND ur.status = 1
+          AND ur.is_deleted = 0
+          AND r.status = 1
+          AND r.is_deleted = 0
+        ORDER BY ur.id ASC
+        LIMIT 1
+    </select>
+
+    <update id="updateLastLoginAt">
+        UPDATE `user`
+        SET last_login_at = #{lastLoginAt},
+            updated_at = #{updatedAt}
+        WHERE id = #{userId}
+    </update>
+
+    <select id="findSessionInfoByUserId" resultType="com.bistu.clubsystembackend.entity.AuthSessionInfo">
+        SELECT u.id AS user_id,
+               u.username,
+               u.real_name,
+               u.status,
+               u.graduate_at,
+               r.role_code,
+               ur.club_id
+        FROM `user` u
+                 LEFT JOIN `user_role` ur ON ur.user_id = u.id
+            AND ur.status = 1
+            AND ur.is_deleted = 0
+                 LEFT JOIN `role` r ON r.id = ur.role_id
+            AND r.status = 1
+            AND r.is_deleted = 0
+        WHERE u.id = #{userId}
+          AND u.is_deleted = 0
+        ORDER BY ur.id ASC
+        LIMIT 1
+    </select>
+
+    <select id="findPrimaryClubId" resultType="long">
+        SELECT ur.club_id
+        FROM `user_role` ur
+                 JOIN `role` r ON ur.role_id = r.id
+        WHERE ur.user_id = #{userId}
+          AND r.role_code = #{roleCode}
+          AND ur.status = 1
+          AND ur.is_deleted = 0
+          AND r.status = 1
+          AND r.is_deleted = 0
+        ORDER BY ur.id ASC
+        LIMIT 1
+    </select>
+
+    <select id="findUserById" resultType="com.bistu.clubsystembackend.entity.AuthUser">
+        SELECT id, username, password_hash, real_name, status, last_login_at, created_at, updated_at, is_deleted
+        FROM `user`
+        WHERE id = #{userId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateUserRealName">
+        UPDATE `user`
+        SET real_name  = #{realName},
+            updated_at = #{updatedAt}
+        WHERE id = #{userId}
+    </update>
+
+    <update id="updateUserPassword">
+        UPDATE `user`
+        SET password_hash = #{passwordHash},
+            updated_at    = #{updatedAt}
+        WHERE id = #{userId}
+    </update>
+
+    <update id="updateUserBasicInfo">
+        UPDATE `user`
+        SET real_name  = #{realName},
+            student_no = #{studentNo},
+            updated_at = #{updatedAt}
+        WHERE id = #{userId}
+    </update>
+
+    <update id="updateUserContact">
+        UPDATE `user`
+        SET phone      = #{phone},
+            email      = #{email},
+            updated_at = #{updatedAt}
+        WHERE id = #{userId}
+    </update>
+
+    <select id="findFullUserById" resultType="com.bistu.clubsystembackend.entity.AuthUser">
+        SELECT id, username, password_hash, real_name, student_no, phone, email,
+               status, last_login_at, created_at, updated_at, is_deleted
+        FROM `user`
+        WHERE id = #{userId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+</mapper>

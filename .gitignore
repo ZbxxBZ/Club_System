@@ -1,0 +1,19 @@
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Claude
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.zip
+club_system_backup.sql
+club_system_backup_new.sql
+
+# TongRDS manual (too large)
+TongRDS手册.pdf

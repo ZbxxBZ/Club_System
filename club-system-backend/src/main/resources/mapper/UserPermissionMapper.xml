@@ -1,0 +1,2317 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.bistu.clubsystembackend.mapper.UserPermissionMapper">
+
+    <select id="listPublicClubs" resultType="com.bistu.clubsystembackend.entity.response.ClubPublicItem">
+        SELECT c.id,
+               c.club_name AS club_name,
+               c.category,
+               c.instructor_name AS instructor_name,
+               c.purpose,
+               c.established_date AS established_date,
+               COALESCE(c.recruit_status, 'CLOSED') AS recruit_status,
+               c.recruit_start_at AS recruit_start_at,
+               c.recruit_end_at AS recruit_end_at,
+               c.recruit_limit AS recruit_limit,
+               (
+                   SELECT COUNT(1)
+                   FROM `club_member` cm_count
+                   WHERE cm_count.club_id = c.id
+                     AND cm_count.member_status = 1
+                     AND cm_count.is_deleted = 0
+               ) + (
+                   SELECT COUNT(1)
+                   FROM `club_join_apply` cja_count
+                   WHERE cja_count.club_id = c.id
+                     AND cja_count.join_status = 1
+                     AND cja_count.is_deleted = 0
+               ) AS signed_up_count,
+               CASE
+                   WHEN cm_self.id IS NOT NULL THEN 'JOINED'
+                   WHEN cja.join_status = 1 THEN 'PENDING'
+                   WHEN cja.join_status = 3 THEN 'REJECTED'
+                   ELSE 'NONE'
+               END AS join_status,
+               CASE
+                   WHEN COALESCE(c.recruit_status, 'CLOSED') = 'OPEN'
+                       AND c.recruit_start_at IS NOT NULL
+                       AND c.recruit_end_at IS NOT NULL
+                       AND NOW() BETWEEN c.recruit_start_at AND c.recruit_end_at THEN TRUE
+                   ELSE FALSE
+               END AS is_recruiting,
+               CASE
+                   WHEN COALESCE(c.recruit_status, 'CLOSED') != 'OPEN' THEN FALSE
+                   WHEN c.recruit_start_at IS NULL OR c.recruit_end_at IS NULL THEN FALSE
+                   WHEN NOW() &lt; c.recruit_start_at THEN FALSE
+                   WHEN NOW() &gt; c.recruit_end_at THEN FALSE
+                   WHEN cm_self.id IS NOT NULL THEN FALSE
+                   WHEN cja.join_status = 1 THEN FALSE
+                   WHEN c.recruit_limit IS NOT NULL AND c.recruit_limit &lt;= (
+                       SELECT COUNT(1)
+                       FROM `club_member` cm
+                       WHERE cm.club_id = c.id
+                         AND cm.member_status = 1
+                         AND cm.is_deleted = 0
+                   ) + (
+                       SELECT COUNT(1)
+                       FROM `club_join_apply` cja_pending
+                       WHERE cja_pending.club_id = c.id
+                         AND cja_pending.join_status = 1
+                         AND cja_pending.is_deleted = 0
+                   ) THEN FALSE
+                   ELSE TRUE
+               END AS join_entry_enabled,
+               'ACTIVE' AS status
+        FROM `club` c
+                 LEFT JOIN `club_join_apply` cja ON cja.id = (
+            SELECT cja2.id
+            FROM `club_join_apply` cja2
+            WHERE cja2.club_id = c.id
+              AND cja2.user_id = #{userId}
+              AND cja2.is_deleted = 0
+            ORDER BY cja2.created_at DESC, cja2.id DESC
+            LIMIT 1
+        )
+                 LEFT JOIN `club_member` cm_self ON cm_self.club_id = c.id
+            AND cm_self.user_id = #{userId}
+            AND cm_self.member_status = 1
+            AND cm_self.is_deleted = 0
+        WHERE c.is_deleted = 0
+          AND c.status = #{clubStatus}
+          AND NOT (
+              cm_self.id IS NOT NULL
+              AND (
+                  COALESCE(c.recruit_status, 'CLOSED') != 'OPEN'
+                  OR c.recruit_start_at IS NULL
+                  OR c.recruit_end_at IS NULL
+                  OR NOW() NOT BETWEEN c.recruit_start_at AND c.recruit_end_at
+              )
+          )
+        <if test="onlyApproved != null and onlyApproved">
+            AND EXISTS (
+                SELECT 1
+                FROM `club_apply` ca
+                WHERE ca.club_id = c.id
+                  AND ca.is_deleted = 0
+                  AND ca.apply_status = #{applyStatus}
+            )
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        <if test="category != null and category != ''">
+            AND c.category = #{category}
+        </if>
+        <if test="isRecruiting != null">
+            <choose>
+                <when test="isRecruiting">
+                    AND COALESCE(c.recruit_status, 'CLOSED') = 'OPEN'
+                    AND c.recruit_start_at IS NOT NULL
+                    AND c.recruit_end_at IS NOT NULL
+                    AND NOW() BETWEEN c.recruit_start_at AND c.recruit_end_at
+                </when>
+                <otherwise>
+                    AND (
+                    COALESCE(c.recruit_status, 'CLOSED') != 'OPEN'
+                        OR c.recruit_start_at IS NULL
+                        OR c.recruit_end_at IS NULL
+                        OR NOW() &lt; c.recruit_start_at
+                        OR NOW() &gt; c.recruit_end_at
+                    )
+                </otherwise>
+            </choose>
+        </if>
+        ORDER BY c.updated_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countPublicClubs" resultType="long">
+        SELECT COUNT(1)
+        FROM `club` c
+                 LEFT JOIN `club_member` cm_self ON cm_self.club_id = c.id
+            AND cm_self.user_id = #{userId}
+            AND cm_self.member_status = 1
+            AND cm_self.is_deleted = 0
+        WHERE c.is_deleted = 0
+          AND c.status = #{clubStatus}
+          AND NOT (
+              cm_self.id IS NOT NULL
+              AND (
+                  COALESCE(c.recruit_status, 'CLOSED') != 'OPEN'
+                  OR c.recruit_start_at IS NULL
+                  OR c.recruit_end_at IS NULL
+                  OR NOW() NOT BETWEEN c.recruit_start_at AND c.recruit_end_at
+              )
+          )
+        <if test="onlyApproved != null and onlyApproved">
+            AND EXISTS (
+                SELECT 1
+                FROM `club_apply` ca
+                WHERE ca.club_id = c.id
+                  AND ca.is_deleted = 0
+                  AND ca.apply_status = #{applyStatus}
+            )
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        <if test="category != null and category != ''">
+            AND c.category = #{category}
+        </if>
+        <if test="isRecruiting != null">
+            <choose>
+                <when test="isRecruiting">
+                    AND COALESCE(c.recruit_status, 'CLOSED') = 'OPEN'
+                    AND c.recruit_start_at IS NOT NULL
+                    AND c.recruit_end_at IS NOT NULL
+                    AND NOW() BETWEEN c.recruit_start_at AND c.recruit_end_at
+                </when>
+                <otherwise>
+                    AND (
+                    COALESCE(c.recruit_status, 'CLOSED') != 'OPEN'
+                        OR c.recruit_start_at IS NULL
+                        OR c.recruit_end_at IS NULL
+                        OR NOW() &lt; c.recruit_start_at
+                        OR NOW() &gt; c.recruit_end_at
+                    )
+                </otherwise>
+            </choose>
+        </if>
+    </select>
+
+    <select id="listClubsByIds" resultType="com.bistu.clubsystembackend.entity.response.ClubPublicItem">
+        SELECT c.id,
+               c.club_name AS club_name,
+               c.category,
+               c.instructor_name AS instructor_name,
+               c.purpose,
+               c.established_date AS established_date,
+               COALESCE(c.recruit_status, 'CLOSED') AS recruit_status,
+               (
+                   SELECT COUNT(1)
+                   FROM `club_member` cm_count
+                   WHERE cm_count.club_id = c.id
+                     AND cm_count.member_status = 1
+                     AND cm_count.is_deleted = 0
+               ) AS signed_up_count
+        FROM `club` c
+        WHERE c.is_deleted = 0
+          AND c.status = 2
+          AND c.id IN
+        <foreach collection="clubIds" item="cid" open="(" separator="," close=")">
+            #{cid}
+        </foreach>
+        ORDER BY FIELD(c.id,
+        <foreach collection="clubIds" item="cid" separator=",">
+            #{cid}
+        </foreach>
+        )
+    </select>
+
+    <select id="existsClubName" resultType="int">
+        SELECT COUNT(1)
+        FROM `club`
+        WHERE club_name = #{clubName}
+          AND is_deleted = 0
+    </select>
+
+    <insert id="insertClub">
+        INSERT INTO `club` (
+            id, club_code, club_name, category, purpose, instructor_name, status, created_at, updated_at, created_by, updated_by, is_deleted
+        )
+        VALUES (
+            #{id}, #{clubCode}, #{clubName}, #{category}, #{purpose}, #{instructorName}, #{status}, #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <insert id="insertClubApply">
+        INSERT INTO `club_apply` (
+            id, club_id, initiator_user_id, charter_url, instructor_name, instructor_proof_url, apply_status, current_step, remark, created_at, updated_at, created_by, updated_by, is_deleted
+        )
+        VALUES (
+            #{id}, #{clubId}, #{initiatorUserId}, #{charterUrl}, #{instructorName}, #{instructorProofUrl}, #{applyStatus}, #{currentStep}, #{remark}, #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <insert id="insertClubCancel">
+        INSERT INTO `club_cancel` (
+            id, club_id, apply_type, apply_reason, asset_settlement_url, cancel_status, created_at, updated_at, created_by, updated_by, is_deleted
+        )
+        VALUES (
+            #{id}, #{clubId}, #{applyType}, #{applyReason}, #{assetSettlementUrl}, #{cancelStatus}, #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <select id="listMyClubApplyRecords" resultType="com.bistu.clubsystembackend.entity.response.ClubApplyMineItem">
+        SELECT ca.id,
+               ca.club_id AS club_id,
+               c.club_name AS club_name,
+               ca.apply_status AS apply_status,
+               ca.created_at AS created_at
+        FROM `club_apply` ca
+                 JOIN `club` c ON c.id = ca.club_id
+        WHERE ca.is_deleted = 0
+          AND c.is_deleted = 0
+          AND ca.initiator_user_id = #{userId}
+        ORDER BY ca.created_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countMyClubApplyRecords" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_apply` ca
+                 JOIN `club` c ON c.id = ca.club_id
+        WHERE ca.is_deleted = 0
+          AND c.is_deleted = 0
+          AND ca.initiator_user_id = #{userId}
+    </select>
+
+    <select id="findLatestClubCancelByClubId" resultType="com.bistu.clubsystembackend.entity.response.ClubCancelApplyData">
+        SELECT cc.id,
+               cc.club_id AS club_id,
+               cc.apply_type AS apply_type,
+               cc.apply_reason AS apply_reason,
+               cc.asset_settlement_url AS asset_settlement_url,
+               cc.cancel_status AS cancel_status,
+               cc.created_at AS created_at
+        FROM `club_cancel` cc
+        WHERE cc.club_id = #{clubId}
+          AND cc.is_deleted = 0
+        ORDER BY cc.created_at DESC, cc.id DESC
+        LIMIT 1
+    </select>
+
+    <select id="listMyClubCancelApplies" resultType="com.bistu.clubsystembackend.entity.response.ClubCancelApplyItem">
+        SELECT cc.id,
+               cc.club_id AS club_id,
+               c.club_name AS club_name,
+               u.real_name AS initiator_real_name,
+               cc.apply_type AS apply_type,
+               cc.apply_reason AS apply_reason,
+               cc.asset_settlement_url AS asset_settlement_url,
+               cc.cancel_status AS cancel_status,
+               cc.created_at AS created_at
+        FROM `club_cancel` cc
+                 JOIN `club` c ON c.id = cc.club_id
+                 LEFT JOIN `user` u ON u.id = cc.created_by
+        WHERE cc.club_id = #{clubId}
+          AND cc.is_deleted = 0
+          AND c.is_deleted = 0
+        ORDER BY cc.created_at DESC, cc.id DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countMyClubCancelApplies" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_cancel` cc
+        WHERE cc.club_id = #{clubId}
+          AND cc.is_deleted = 0
+    </select>
+
+    <select id="findClubStatusById" resultType="int">
+        SELECT status
+        FROM `club`
+        WHERE id = #{clubId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateClubStatus">
+        UPDATE `club`
+        SET status = #{status},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{clubId}
+          AND is_deleted = 0
+    </update>
+
+    <update id="updateClubEstablishDateToToday">
+        UPDATE `club`
+        SET established_date = CURDATE(),
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{clubId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="findClubMemberStatus" resultType="int">
+        SELECT member_status
+        FROM `club_member`
+        WHERE club_id = #{clubId}
+          AND user_id = #{userId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findClubJoinEligibilityMeta" resultType="com.bistu.clubsystembackend.entity.ClubJoinEligibilityMeta">
+        SELECT c.id,
+               COALESCE(c.recruit_status, 'CLOSED') AS recruit_status,
+               c.recruit_start_at AS recruit_start_at,
+               c.recruit_end_at AS recruit_end_at,
+               c.recruit_limit AS recruit_limit,
+               (
+                   SELECT COUNT(1)
+                   FROM `club_member` cm
+                   WHERE cm.club_id = c.id
+                     AND cm.member_status = 1
+                     AND cm.is_deleted = 0
+               ) AS active_member_count,
+               (
+                   SELECT COUNT(1)
+                   FROM `club_join_apply` cja
+                   WHERE cja.club_id = c.id
+                     AND cja.join_status = 1
+                     AND cja.is_deleted = 0
+               ) AS pending_apply_count,
+               EXISTS (
+                   SELECT 1
+                   FROM `club_apply` ca
+                   WHERE ca.club_id = c.id
+                     AND ca.is_deleted = 0
+                     AND ca.apply_status = #{approvedStatus}
+               ) AS approved
+        FROM `club` c
+        WHERE c.id = #{clubId}
+          AND c.status = #{clubStatus}
+          AND c.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findLatestJoinApplyStatus" resultType="int">
+        SELECT cja.join_status
+        FROM `club_join_apply` cja
+        WHERE cja.club_id = #{clubId}
+          AND cja.user_id = #{userId}
+          AND cja.is_deleted = 0
+        ORDER BY cja.created_at DESC, cja.id DESC
+        LIMIT 1
+    </select>
+
+    <select id="findLatestJoinApplyId" resultType="long">
+        SELECT cja.id
+        FROM `club_join_apply` cja
+        WHERE cja.club_id = #{clubId}
+          AND cja.user_id = #{userId}
+          AND cja.is_deleted = 0
+        ORDER BY cja.created_at DESC, cja.id DESC
+        LIMIT 1
+    </select>
+
+    <update id="resetJoinApplyToPending">
+        UPDATE `club_join_apply`
+        SET join_status    = 1,
+            self_intro     = #{selfIntro},
+            apply_reason   = #{applyReason},
+            reject_reason  = NULL,
+            review_user_id = NULL,
+            reviewed_at    = NULL,
+            updated_by     = #{updatedBy},
+            updated_at     = #{now}
+        WHERE id = #{applyId}
+          AND is_deleted = 0
+    </update>
+
+    <insert id="insertClubJoinApply">
+        INSERT INTO `club_join_apply` (
+            id, club_id, user_id, self_intro, apply_reason, join_status, created_at, updated_at, created_by, updated_by, is_deleted
+        )
+        VALUES (
+            #{id}, #{clubId}, #{userId}, #{selfIntro}, #{applyReason}, #{joinStatus}, #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <select id="listMyJoinApplies" resultType="com.bistu.clubsystembackend.entity.response.ClubJoinApplyMineItem">
+        SELECT cja.id,
+               cja.club_id AS club_id,
+               c.club_name AS club_name,
+               CASE
+                   WHEN cja.join_status = 1 THEN 'PENDING'
+                   WHEN cja.join_status = 2 THEN 'JOINED'
+                   WHEN cja.join_status = 3 THEN 'REJECTED'
+                   ELSE 'UNKNOWN'
+               END AS join_status,
+               cja.self_intro AS self_intro,
+               cja.apply_reason AS apply_reason,
+               cja.reject_reason AS reject_reason,
+               cja.created_at AS created_at,
+               cja.reviewed_at AS reviewed_at,
+               cp.position_name AS position_name,
+               CASE WHEN cm.id IS NOT NULL THEN TRUE ELSE FALSE END AS is_active_member
+        FROM `club_join_apply` cja
+                 JOIN `club` c ON c.id = cja.club_id
+                 LEFT JOIN `club_member` cm ON cm.club_id = cja.club_id
+                     AND cm.user_id = cja.user_id
+                     AND cm.member_status = 1
+                     AND cm.is_deleted = 0
+                 LEFT JOIN `club_position` cp ON cp.id = cm.position_id
+                     AND cp.is_deleted = 0
+        WHERE cja.user_id = #{userId}
+          AND cja.is_deleted = 0
+          AND c.is_deleted = 0
+          AND c.status != 5
+        ORDER BY cja.created_at DESC, cja.id DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countMyJoinApplies" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_join_apply` cja
+                 JOIN `club` c ON c.id = cja.club_id
+        WHERE cja.user_id = #{userId}
+          AND cja.is_deleted = 0
+          AND c.is_deleted = 0
+          AND c.status != 5
+    </select>
+
+    <select id="listClubJoinApplies" resultType="com.bistu.clubsystembackend.entity.response.ClubAdminJoinApplyItem">
+        SELECT cja.id,
+               cja.club_id AS club_id,
+               cja.user_id AS user_id,
+               u.username,
+               u.real_name AS real_name,
+               CASE
+                   WHEN cja.join_status = 1 THEN 'PENDING'
+                   WHEN cja.join_status = 2 THEN 'JOINED'
+                   WHEN cja.join_status = 3 THEN 'REJECTED'
+                   ELSE 'UNKNOWN'
+               END AS join_status,
+               cja.self_intro AS self_intro,
+               cja.apply_reason AS apply_reason,
+               cja.reject_reason AS reject_reason,
+               cja.created_at AS created_at,
+               cja.reviewed_at AS reviewed_at
+        FROM `club_join_apply` cja
+                 JOIN `user` u ON u.id = cja.user_id
+        WHERE cja.club_id = #{clubId}
+          AND cja.is_deleted = 0
+        <if test="joinStatus != null">
+            AND cja.join_status = #{joinStatus}
+        </if>
+        ORDER BY cja.created_at DESC, cja.id DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubJoinApplies" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_join_apply` cja
+        WHERE cja.club_id = #{clubId}
+          AND cja.is_deleted = 0
+        <if test="joinStatus != null">
+            AND cja.join_status = #{joinStatus}
+        </if>
+    </select>
+
+    <select id="findClubJoinApplyByIdForUpdate" resultType="com.bistu.clubsystembackend.entity.ClubJoinApplyRecord">
+        SELECT cja.id,
+               cja.club_id AS club_id,
+               cja.user_id AS user_id,
+               cja.join_status AS join_status,
+               cja.apply_reason AS apply_reason,
+               cja.reject_reason AS reject_reason,
+               cja.review_user_id AS review_user_id,
+               cja.created_at AS created_at,
+               cja.reviewed_at AS reviewed_at
+        FROM `club_join_apply` cja
+        WHERE cja.id = #{applyId}
+          AND cja.is_deleted = 0
+        LIMIT 1
+        FOR UPDATE
+    </select>
+
+    <update id="updateClubJoinApplyDecision">
+        UPDATE `club_join_apply`
+        SET join_status = #{joinStatus},
+            review_user_id = #{reviewUserId},
+            reviewed_at = #{reviewedAt},
+            reject_reason = #{rejectReason},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{applyId}
+          AND is_deleted = 0
+    </update>
+
+    <insert id="insertClubMember">
+        INSERT INTO `club_member` (
+            id, club_id, user_id, join_at, member_status, contribution_score, created_at, updated_at, is_deleted
+        )
+        VALUES (
+                   #{id}, #{clubId}, #{userId}, #{now}, 1, 0, #{now}, #{now}, 0
+               )
+    </insert>
+
+    <update id="reactivateClubMember">
+        UPDATE `club_member`
+        SET member_status = 1,
+            join_at = #{now},
+            quit_at = NULL,
+            updated_at = #{now}
+        WHERE club_id = #{clubId}
+          AND user_id = #{userId}
+          AND is_deleted = 0
+    </update>
+
+    <update id="reactivateClubMemberWithPosition">
+        UPDATE `club_member`
+        SET member_status = 1,
+            position_id = #{positionId},
+            join_at = #{now},
+            quit_at = NULL,
+            updated_by = #{updatedBy},
+            updated_at = #{now}
+        WHERE club_id = #{clubId}
+          AND user_id = #{userId}
+          AND is_deleted = 0
+    </update>
+
+    <insert id="insertClubMemberWithPosition">
+        INSERT INTO `club_member` (
+            id, club_id, user_id, position_id, join_at, member_status, contribution_score, created_at, updated_at, created_by, updated_by, is_deleted
+        )
+        VALUES (
+            #{id}, #{clubId}, #{userId}, #{positionId}, #{now}, 1, 0, #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <select id="listOpenEvents" resultType="com.bistu.clubsystembackend.entity.response.EventOpenItem">
+        SELECT e.id,
+               c.club_name AS club_name,
+               e.title,
+               e.content,
+               e.location,
+               e.start_at AS start_at,
+               e.end_at AS end_at,
+               e.signup_start_at AS signup_start_at,
+               e.signup_end_at AS signup_end_at,
+               e.limit_count AS limit_count,
+               e.only_member AS only_member,
+               GREATEST(e.limit_count - IFNULL(s.signed_count, 0), 0) AS remaining_slots,
+               e.event_status AS event_status,
+               es_self.signup_status AS signup_status,
+               CASE WHEN ec_self.id IS NOT NULL THEN TRUE ELSE FALSE END AS checked_in
+        FROM `event` e
+                 JOIN `club` c ON c.id = e.club_id AND c.is_deleted = 0
+                 LEFT JOIN (
+            SELECT es.event_id, COUNT(1) AS signed_count
+            FROM `event_signup` es
+            WHERE es.is_deleted = 0 AND es.signup_status = 1
+            GROUP BY es.event_id
+        ) s ON s.event_id = e.id
+                 LEFT JOIN `event_signup` es_self ON es_self.event_id = e.id
+            AND es_self.user_id = #{userId} AND es_self.is_deleted = 0
+                 LEFT JOIN `event_checkin` ec_self ON ec_self.event_id = e.id
+            AND ec_self.user_id = #{userId} AND ec_self.is_deleted = 0
+        WHERE e.is_deleted = 0
+          AND (e.event_status IN (3, 6) OR (es_self.signup_status = 1 AND e.event_status IN (3, 4, 6)))
+        <if test="keyword != null and keyword != ''">
+            AND (e.title LIKE CONCAT('%', #{keyword}, '%') OR c.club_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="onlyMyClubs == true">
+            AND e.club_id IN (
+                SELECT cm.club_id FROM `club_member` cm
+                WHERE cm.user_id = #{userId} AND cm.member_status = 1 AND cm.is_deleted = 0
+            )
+        </if>
+        ORDER BY e.start_at ASC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countOpenEvents" resultType="long">
+        SELECT COUNT(1)
+        FROM `event` e
+                 JOIN `club` c ON c.id = e.club_id AND c.is_deleted = 0
+                 LEFT JOIN `event_signup` es_self ON es_self.event_id = e.id
+            AND es_self.user_id = #{userId} AND es_self.is_deleted = 0
+        WHERE e.is_deleted = 0
+          AND (e.event_status IN (3, 6) OR (es_self.signup_status = 1 AND e.event_status IN (3, 4, 6)))
+        <if test="keyword != null and keyword != ''">
+            AND (e.title LIKE CONCAT('%', #{keyword}, '%') OR c.club_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="onlyMyClubs == true">
+            AND e.club_id IN (
+                SELECT cm.club_id FROM `club_member` cm
+                WHERE cm.user_id = #{userId} AND cm.member_status = 1 AND cm.is_deleted = 0
+            )
+        </if>
+    </select>
+
+    <select id="selectEventForSignup" resultType="com.bistu.clubsystembackend.entity.EventSignupMeta">
+        SELECT e.id,
+               e.club_id,
+               e.limit_count,
+               e.only_member,
+               e.event_status,
+               e.signup_start_at,
+               e.signup_end_at
+        FROM `event` e
+        WHERE e.id = #{eventId}
+          AND e.is_deleted = 0
+        FOR UPDATE
+    </select>
+
+    <select id="countActiveSignups" resultType="int">
+        SELECT COUNT(1)
+        FROM `event_signup`
+        WHERE event_id = #{eventId}
+          AND signup_status = 1
+          AND is_deleted = 0
+    </select>
+
+    <select id="findEventLimitCount" resultType="java.lang.Integer">
+        SELECT limit_count FROM `event` WHERE id = #{eventId} AND is_deleted = 0
+    </select>
+
+    <select id="hasSigned" resultType="int">
+        SELECT COUNT(1)
+        FROM `event_signup`
+        WHERE event_id = #{eventId}
+          AND user_id = #{userId}
+          AND signup_status = 1
+          AND is_deleted = 0
+    </select>
+
+    <select id="hasCanceledSignup" resultType="int">
+        SELECT COUNT(1)
+        FROM `event_signup`
+        WHERE event_id = #{eventId}
+          AND user_id = #{userId}
+          AND signup_status = 2
+          AND is_deleted = 0
+    </select>
+
+    <insert id="insertEventSignup">
+        INSERT INTO `event_signup` (
+            id, event_id, club_id, user_id, signup_status, signup_at, created_at, updated_at, is_deleted
+        )
+        VALUES (
+                   #{id}, #{eventId}, #{clubId}, #{userId}, 1, #{now}, #{now}, #{now}, 0
+               )
+    </insert>
+
+    <select id="findManagedClubIdByUserId" resultType="long">
+        SELECT ur.club_id
+        FROM `user_role` ur
+                 JOIN `role` r ON ur.role_id = r.id
+        WHERE ur.user_id = #{userId}
+          AND r.role_code = 'CLUB_ADMIN'
+          AND ur.status = 1
+          AND ur.is_deleted = 0
+          AND r.status = 1
+          AND r.is_deleted = 0
+          AND ur.club_id IS NOT NULL
+        ORDER BY ur.id ASC
+        LIMIT 1
+    </select>
+
+    <select id="findClubInfoById" resultType="com.bistu.clubsystembackend.entity.response.ClubInfoData">
+        SELECT id,
+               club_name,
+               category,
+               description AS introduction,
+               purpose,
+               instructor_name
+        FROM `club`
+        WHERE id = #{clubId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findClubRecruitConfigById" resultType="com.bistu.clubsystembackend.entity.response.ClubRecruitConfigData">
+        SELECT c.id AS club_id,
+               c.recruit_start_at AS recruit_start_at,
+               c.recruit_end_at AS recruit_end_at,
+               c.recruit_limit AS recruit_limit,
+               COALESCE(c.recruit_status, 'CLOSED') AS recruit_status,
+               c.updated_at AS updated_at
+        FROM `club` c
+        WHERE c.id = #{clubId}
+          AND c.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateClubInfo">
+        UPDATE `club`
+        SET club_name = #{clubName},
+            category = #{category},
+            description = #{introduction},
+            purpose = #{purpose},
+            instructor_name = #{instructorName},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{clubId}
+          AND is_deleted = 0
+    </update>
+
+    <update id="updateClubRecruitConfig">
+        UPDATE `club`
+        SET recruit_start_at = #{recruitStartAt},
+            recruit_end_at = #{recruitEndAt},
+            recruit_limit = #{recruitLimit},
+            recruit_status = #{recruitStatus},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{clubId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="listClubPositions" resultType="com.bistu.clubsystembackend.entity.response.ClubPositionItem">
+        SELECT cp.id,
+               cp.club_id,
+               cp.position_name,
+               cp.parent_position_id,
+               cp.level_no,
+               cp.sort_no,
+               cp.created_at
+        FROM `club_position` cp
+        WHERE cp.club_id = #{clubId}
+          AND cp.is_deleted = 0
+        ORDER BY cp.level_no ASC, cp.sort_no ASC, cp.id ASC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubPositions" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_position` cp
+        WHERE cp.club_id = #{clubId}
+          AND cp.is_deleted = 0
+    </select>
+
+    <select id="findClubPositionById" resultType="com.bistu.clubsystembackend.entity.response.ClubPositionItem">
+        SELECT cp.id,
+               cp.club_id,
+               cp.position_name,
+               cp.parent_position_id,
+               cp.level_no,
+               cp.sort_no,
+               cp.created_at
+        FROM `club_position` cp
+        WHERE cp.club_id = #{clubId}
+          AND cp.id = #{positionId}
+          AND cp.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <insert id="insertClubPosition">
+        INSERT INTO `club_position` (
+            id, club_id, position_name, parent_position_id, level_no, sort_no, created_at, updated_at, created_by, updated_by, is_deleted
+        )
+        VALUES (
+            #{id}, #{clubId}, #{positionName}, #{parentPositionId}, #{levelNo}, #{sortNo}, #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <update id="updateClubPosition">
+        UPDATE `club_position`
+        SET position_name = #{positionName},
+            parent_position_id = #{parentPositionId},
+            level_no = #{levelNo},
+            sort_no = #{sortNo},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE club_id = #{clubId}
+          AND id = #{positionId}
+          AND is_deleted = 0
+    </update>
+
+    <update id="deleteClubPosition">
+        UPDATE `club_position`
+        SET is_deleted = 1,
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE club_id = #{clubId}
+          AND id = #{positionId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="countChildPositions" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_position` cp
+        WHERE cp.club_id = #{clubId}
+          AND cp.parent_position_id = #{parentPositionId}
+          AND cp.is_deleted = 0
+    </select>
+
+    <select id="countMembersByPosition" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_member` cm
+        WHERE cm.club_id = #{clubId}
+          AND cm.position_id = #{positionId}
+          AND cm.member_status = 1
+          AND cm.is_deleted = 0
+    </select>
+
+    <select id="findMaxSortNoByParent" resultType="int">
+        SELECT MAX(cp.sort_no)
+        FROM `club_position` cp
+        WHERE cp.club_id = #{clubId}
+          AND cp.is_deleted = 0
+        <if test="parentPositionId == null">
+            AND cp.parent_position_id IS NULL
+        </if>
+        <if test="parentPositionId != null">
+            AND cp.parent_position_id = #{parentPositionId}
+        </if>
+    </select>
+
+    <select id="listClubMembers" resultType="com.bistu.clubsystembackend.entity.response.ClubMemberItem">
+        SELECT cm.id,
+               cm.club_id,
+               cm.user_id,
+               u.username,
+               u.real_name,
+               cm.position_id,
+               cp.position_name,
+               cm.member_status,
+               cm.join_at,
+               cm.quit_at,
+               cm.contribution_score
+        FROM `club_member` cm
+                 JOIN `user` u ON cm.user_id = u.id
+                 LEFT JOIN `club_position` cp ON cp.id = cm.position_id AND cp.is_deleted = 0
+        WHERE cm.club_id = #{clubId}
+          AND cm.is_deleted = 0
+          AND cm.member_status = 1
+        ORDER BY cm.join_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubMembers" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_member` cm
+        WHERE cm.club_id = #{clubId}
+          AND cm.is_deleted = 0
+          AND cm.member_status = 1
+    </select>
+
+    <select id="findPositionIdByName" resultType="long">
+        SELECT id
+        FROM `club_position`
+        WHERE club_id = #{clubId}
+          AND position_name = #{positionName}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateClubMemberPosition">
+        UPDATE `club_member`
+        SET position_id = #{positionId},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{memberId}
+          AND club_id = #{clubId}
+          AND is_deleted = 0
+    </update>
+
+    <update id="removeClubMember">
+        UPDATE `club_member`
+        SET member_status = 2,
+            quit_at = #{now},
+            updated_by = #{updatedBy},
+            updated_at = #{now}
+        WHERE id = #{memberId}
+          AND club_id = #{clubId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="listClubFinances" resultType="com.bistu.clubsystembackend.entity.response.FinanceRecordItem">
+        SELECT *
+        FROM (
+                 SELECT i.id,
+                        'INCOME' AS type,
+                        '收入' AS type_name,
+                        i.amount,
+                        'APPROVED' AS status,
+                        i.occur_at
+                 FROM `income` i
+                 WHERE i.club_id = #{clubId}
+                   AND i.is_deleted = 0
+                 UNION ALL
+                 SELECT e.id,
+                        'EXPENSE' AS type,
+                        '支出' AS type_name,
+                        e.amount,
+                        CASE
+                            WHEN e.expense_status = 1 THEN 'PENDING'
+                            WHEN e.expense_status = 2 THEN 'APPROVED'
+                            WHEN e.expense_status = 3 THEN 'REJECTED'
+                            WHEN e.expense_status = 4 THEN 'PAID'
+                            ELSE 'UNKNOWN'
+                            END AS status,
+                        e.created_at AS occur_at
+                 FROM `expense` e
+                 WHERE e.club_id = #{clubId}
+                   AND e.is_deleted = 0
+             ) t
+        ORDER BY t.occur_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubFinances" resultType="long">
+        SELECT (
+                   (SELECT COUNT(1) FROM `income` i WHERE i.club_id = #{clubId} AND i.is_deleted = 0) +
+                   (SELECT COUNT(1) FROM `expense` e WHERE e.club_id = #{clubId} AND e.is_deleted = 0)
+                   )
+    </select>
+
+    <select id="listUsers" resultType="com.bistu.clubsystembackend.entity.response.SchoolUserItem">
+        SELECT u.id,
+               u.username,
+               u.real_name,
+                (
+                    SELECT r.role_code
+                    FROM `user_role` ur2
+                             JOIN `role` r ON ur2.role_id = r.id
+                   WHERE ur2.user_id = u.id
+                     AND ur2.status = 1
+                     AND ur2.is_deleted = 0
+                     AND r.status = 1
+                     AND r.is_deleted = 0
+                    ORDER BY ur2.updated_at DESC, ur2.id DESC
+                    LIMIT 1
+                ) AS role_code,
+               CASE
+                   WHEN u.graduate_at IS NOT NULL AND u.graduate_at &lt;= NOW() THEN 'GRADUATED'
+                   WHEN u.status = 1 THEN 'ACTIVE'
+                   WHEN u.status = 2 THEN 'FROZEN'
+                   WHEN u.status = 3 THEN 'CANCELED'
+                   ELSE 'CANCELED'
+                   END AS status,
+               u.graduate_at
+        FROM `user` u
+        WHERE u.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (u.username LIKE CONCAT('%', #{keyword}, '%')
+            OR u.real_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="dbStatus != null">
+            AND u.status = #{dbStatus}
+        </if>
+        <if test="graduated != null">
+            <if test="graduated">
+                AND u.graduate_at IS NOT NULL AND u.graduate_at &lt;= NOW()
+            </if>
+            <if test="!graduated">
+                AND (u.graduate_at IS NULL OR u.graduate_at &gt; NOW())
+            </if>
+        </if>
+        <if test="roleCode != null and roleCode != ''">
+            AND EXISTS (
+                SELECT 1
+                FROM `user_role` ur
+                         JOIN `role` r ON ur.role_id = r.id
+                WHERE ur.user_id = u.id
+                  AND ur.status = 1
+                  AND ur.is_deleted = 0
+                  AND r.status = 1
+                  AND r.is_deleted = 0
+                  AND r.role_code = #{roleCode}
+            )
+        </if>
+        ORDER BY u.id DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countUsers" resultType="long">
+        SELECT COUNT(1)
+        FROM `user` u
+        WHERE u.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (u.username LIKE CONCAT('%', #{keyword}, '%')
+            OR u.real_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        <if test="dbStatus != null">
+            AND u.status = #{dbStatus}
+        </if>
+        <if test="graduated != null">
+            <if test="graduated">
+                AND u.graduate_at IS NOT NULL AND u.graduate_at &lt;= NOW()
+            </if>
+            <if test="!graduated">
+                AND (u.graduate_at IS NULL OR u.graduate_at &gt; NOW())
+            </if>
+        </if>
+        <if test="roleCode != null and roleCode != ''">
+            AND EXISTS (
+                SELECT 1
+                FROM `user_role` ur
+                         JOIN `role` r ON ur.role_id = r.id
+                WHERE ur.user_id = u.id
+                  AND ur.status = 1
+                  AND ur.is_deleted = 0
+                  AND r.status = 1
+                  AND r.is_deleted = 0
+                  AND r.role_code = #{roleCode}
+            )
+        </if>
+    </select>
+
+    <select id="findUserStatusById" resultType="int">
+        SELECT status
+        FROM `user`
+        WHERE id = #{userId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateUserStatus">
+        UPDATE `user`
+        SET status = #{status},
+            updated_at = #{updatedAt}
+        WHERE id = #{userId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="findRoleIdByCode" resultType="long">
+        SELECT id
+        FROM `role`
+        WHERE role_code = #{roleCode}
+          AND status = 1
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findUserRoleId" resultType="long">
+        SELECT id
+        FROM `user_role`
+        WHERE user_id = #{userId}
+          AND role_id = #{roleId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findEffectiveRoleCodeByUserId" resultType="string">
+        SELECT r.role_code
+        FROM `user_role` ur
+                 JOIN `role` r ON ur.role_id = r.id
+        WHERE ur.user_id = #{userId}
+          AND ur.status = 1
+          AND ur.is_deleted = 0
+          AND r.status = 1
+          AND r.is_deleted = 0
+        ORDER BY ur.updated_at DESC, ur.id DESC
+        LIMIT 1
+    </select>
+
+    <select id="existsUserById" resultType="int">
+        SELECT COUNT(1)
+        FROM `user`
+        WHERE id = #{userId}
+          AND is_deleted = 0
+    </select>
+
+    <update id="disableUserRolesByUserId">
+        UPDATE `user_role`
+        SET status = 0,
+            updated_at = #{updatedAt}
+        WHERE user_id = #{userId}
+          AND status = 1
+          AND is_deleted = 0
+    </update>
+
+    <update id="activateUserRole">
+        UPDATE `user_role`
+        SET status = 1,
+            club_id = #{clubId},
+            updated_at = #{updatedAt}
+        WHERE user_id = #{userId}
+          AND role_id = #{roleId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="findActiveUserRoleRecordId" resultType="long">
+        SELECT id
+        FROM `user_role`
+        WHERE user_id = #{userId}
+          AND status = 1
+          AND is_deleted = 0
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+    </select>
+
+    <select id="findLatestUserRoleRecordId" resultType="long">
+        SELECT id
+        FROM `user_role`
+        WHERE user_id = #{userId}
+          AND is_deleted = 0
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+    </select>
+
+    <update id="updateUserRoleRecordById">
+        UPDATE `user_role`
+        SET role_id = #{roleId},
+            club_id = #{clubId},
+            status = 1,
+            updated_at = #{updatedAt}
+        WHERE id = #{id}
+          AND is_deleted = 0
+    </update>
+
+    <update id="disableOtherActiveUserRoles">
+        UPDATE `user_role`
+        SET status = 0,
+            updated_at = #{updatedAt}
+        WHERE user_id = #{userId}
+          AND id != #{keepId}
+          AND status = 1
+          AND is_deleted = 0
+    </update>
+
+    <select id="findAnyClubIdByUser" resultType="long">
+        SELECT club_id
+        FROM `club_member`
+        WHERE user_id = #{userId}
+          AND member_status = 1
+          AND is_deleted = 0
+        ORDER BY join_at DESC
+        LIMIT 1
+    </select>
+
+    <insert id="insertUserRole">
+        INSERT INTO `user_role` (
+            id, user_id, role_id, club_id, status, created_at, updated_at, is_deleted
+        )
+        VALUES (
+                   #{id}, #{userId}, #{roleId}, #{clubId}, 1, #{now}, #{now}, 0
+               )
+    </insert>
+
+    <select id="listClubApprovals" resultType="com.bistu.clubsystembackend.entity.response.ClubApprovalItem">
+        SELECT ca.id,
+               ca.club_id,
+               ca.initiator_user_id,
+               c.club_name,
+               ca.apply_status,
+               u.real_name AS initiator_real_name,
+               ca.created_at
+        FROM `club_apply` ca
+                 JOIN `club` c ON c.id = ca.club_id
+                 LEFT JOIN `user` u ON u.id = ca.initiator_user_id
+        WHERE ca.is_deleted = 0
+          AND c.is_deleted = 0
+        <if test="applyStatus != null">
+            AND ca.apply_status = #{applyStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        ORDER BY ca.created_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubApprovals" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_apply` ca
+                 JOIN `club` c ON c.id = ca.club_id
+        WHERE ca.is_deleted = 0
+          AND c.is_deleted = 0
+        <if test="applyStatus != null">
+            AND ca.apply_status = #{applyStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+    </select>
+
+    <select id="findClubApprovalById" resultType="com.bistu.clubsystembackend.entity.response.ClubApprovalItem">
+        SELECT ca.id,
+               ca.club_id,
+               ca.initiator_user_id,
+               c.club_name,
+               ca.apply_status,
+               u.real_name AS initiator_real_name,
+               ca.created_at
+        FROM `club_apply` ca
+                 JOIN `club` c ON c.id = ca.club_id
+                 LEFT JOIN `user` u ON u.id = ca.initiator_user_id
+        WHERE ca.id = #{approvalId}
+          AND ca.is_deleted = 0
+          AND c.is_deleted = 0
+        LIMIT 1
+        FOR UPDATE
+    </select>
+
+    <select id="findClubApprovalDetailById" resultType="com.bistu.clubsystembackend.entity.response.ClubApprovalDetailData">
+        SELECT ca.id,
+               ca.club_id AS club_id,
+               c.club_name AS club_name,
+               c.category AS category,
+               ca.apply_status AS apply_status,
+               u.real_name AS initiator_real_name,
+               COALESCE(ca.instructor_name, c.instructor_name) AS instructor_name,
+               c.purpose AS purpose,
+               ca.remark AS remark,
+               ca.charter_url AS charter_url,
+               ca.instructor_proof_url AS instructor_proof_url,
+               ca.created_at AS created_at
+        FROM `club_apply` ca
+                 JOIN `club` c ON c.id = ca.club_id
+                 LEFT JOIN `user` u ON u.id = ca.initiator_user_id
+        WHERE ca.id = #{approvalId}
+          AND ca.is_deleted = 0
+          AND c.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="listClubCancelApprovals" resultType="com.bistu.clubsystembackend.entity.response.ClubCancelApplyItem">
+        SELECT cc.id,
+               cc.club_id AS club_id,
+               c.club_name AS club_name,
+               u.real_name AS initiator_real_name,
+               cc.apply_type AS apply_type,
+               cc.apply_reason AS apply_reason,
+               cc.asset_settlement_url AS asset_settlement_url,
+               cc.cancel_status AS cancel_status,
+               cc.created_at AS created_at
+        FROM `club_cancel` cc
+                 JOIN `club` c ON c.id = cc.club_id
+                 LEFT JOIN `user` u ON u.id = cc.created_by
+        WHERE cc.is_deleted = 0
+          AND c.is_deleted = 0
+        <if test="cancelStatus != null">
+            AND cc.cancel_status = #{cancelStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        ORDER BY cc.created_at DESC, cc.id DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubCancelApprovals" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_cancel` cc
+                 JOIN `club` c ON c.id = cc.club_id
+        WHERE cc.is_deleted = 0
+          AND c.is_deleted = 0
+        <if test="cancelStatus != null">
+            AND cc.cancel_status = #{cancelStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+    </select>
+
+    <select id="findClubCancelDetailById" resultType="com.bistu.clubsystembackend.entity.response.ClubCancelDetailData">
+        SELECT cc.id,
+               cc.club_id AS club_id,
+               c.club_name AS club_name,
+               cc.apply_type AS apply_type,
+               cc.apply_reason AS apply_reason,
+               cc.asset_settlement_url AS asset_settlement_url,
+               cc.cancel_status AS cancel_status,
+               u.real_name AS initiator_real_name,
+               cc.created_at AS created_at
+        FROM `club_cancel` cc
+                 JOIN `club` c ON c.id = cc.club_id
+                 LEFT JOIN `user` u ON u.id = cc.created_by
+        WHERE cc.id = #{cancelId}
+          AND cc.is_deleted = 0
+          AND c.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findClubCancelById" resultType="com.bistu.clubsystembackend.entity.response.ClubCancelApplyData">
+        SELECT cc.id,
+               cc.club_id AS club_id,
+               cc.apply_type AS apply_type,
+               cc.apply_reason AS apply_reason,
+               cc.asset_settlement_url AS asset_settlement_url,
+               cc.cancel_status AS cancel_status,
+               cc.created_at AS created_at
+        FROM `club_cancel` cc
+        WHERE cc.id = #{cancelId}
+          AND cc.is_deleted = 0
+        LIMIT 1
+        FOR UPDATE
+    </select>
+
+    <update id="updateClubCancelStatus">
+        UPDATE `club_cancel`
+        SET cancel_status = #{cancelStatus},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{cancelId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="findClubInitiatorUserId" resultType="long">
+        SELECT ca.initiator_user_id
+        FROM `club_apply` ca
+        WHERE ca.club_id = #{clubId}
+          AND ca.is_deleted = 0
+          AND ca.initiator_user_id IS NOT NULL
+        ORDER BY (ca.apply_status = 4) DESC, ca.created_at ASC, ca.id ASC
+        LIMIT 1
+    </select>
+
+    <update id="updateClubApprovalDecision">
+        UPDATE `club_apply`
+        SET apply_status = #{applyStatus},
+            current_step = #{currentStep},
+            remark = #{remark},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{approvalId}
+          AND is_deleted = 0
+    </update>
+
+    <select id="listSchoolAdminClubManagePage" resultType="com.bistu.clubsystembackend.entity.response.SchoolAdminClubListItem">
+        SELECT c.id AS club_id,
+               c.club_name AS club_name,
+               c.category AS category,
+               c.status AS status,
+               ca.apply_status AS apply_status,
+               u.real_name AS initiator_real_name,
+               c.instructor_name AS instructor_name
+        FROM `club` c
+                 LEFT JOIN `club_apply` ca ON ca.id = (
+            SELECT ca2.id
+            FROM `club_apply` ca2
+            WHERE ca2.club_id = c.id
+              AND ca2.is_deleted = 0
+            ORDER BY ca2.created_at DESC, ca2.id DESC
+            LIMIT 1
+        )
+                 LEFT JOIN `user` u ON u.id = ca.initiator_user_id
+        WHERE c.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        <if test="category != null and category != ''">
+            AND c.category = #{category}
+        </if>
+        ORDER BY c.updated_at DESC, c.id DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countSchoolAdminClubManagePage" resultType="long">
+        SELECT COUNT(1)
+        FROM `club` c
+        WHERE c.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        <if test="category != null and category != ''">
+            AND c.category = #{category}
+        </if>
+    </select>
+
+    <select id="findSchoolAdminClubManageDetailByClubId" resultType="com.bistu.clubsystembackend.entity.response.SchoolAdminClubDetailData">
+        SELECT c.id AS club_id,
+               c.club_name AS club_name,
+               c.category AS category,
+               c.status AS status,
+               ca.apply_status AS apply_status,
+               u.real_name AS initiator_real_name,
+               c.instructor_name AS instructor_name,
+               c.purpose AS purpose,
+               ca.charter_url AS charter_url,
+               ca.instructor_proof_url AS instructor_proof_url,
+               ca.created_at AS created_at
+        FROM `club` c
+                 LEFT JOIN `club_apply` ca ON ca.id = (
+            SELECT ca2.id
+            FROM `club_apply` ca2
+            WHERE ca2.club_id = c.id
+              AND ca2.is_deleted = 0
+            ORDER BY ca2.created_at DESC, ca2.id DESC
+            LIMIT 1
+        )
+                 LEFT JOIN `user` u ON u.id = ca.initiator_user_id
+        WHERE c.id = #{clubId}
+          AND c.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateSchoolAdminClub">
+        UPDATE `club`
+        SET club_name = COALESCE(#{clubName}, club_name),
+            category = COALESCE(#{category}, category),
+            purpose = COALESCE(#{purpose}, purpose),
+            instructor_name = COALESCE(#{instructorName}, instructor_name),
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{clubId}
+          AND is_deleted = 0
+    </update>
+
+    <delete id="hardDeleteClubApplyByClubId">
+        DELETE FROM `club_apply`
+        WHERE club_id = #{clubId}
+    </delete>
+
+    <delete id="hardDeleteClubCancelByClubId">
+        DELETE FROM `club_cancel`
+        WHERE club_id = #{clubId}
+    </delete>
+
+    <delete id="hardDeleteClubById">
+        DELETE FROM `club`
+        WHERE id = #{clubId}
+    </delete>
+
+    <update id="exitGraduatedMembers">
+        UPDATE `club_member` cm
+            JOIN `user` u ON cm.user_id = u.id
+        SET cm.member_status = 2,
+            cm.quit_at = #{now},
+            cm.updated_at = #{now}
+        WHERE cm.member_status = 1
+          AND cm.is_deleted = 0
+          AND u.is_deleted = 0
+          AND u.graduate_at IS NOT NULL
+          AND u.graduate_at &lt;= #{now}
+    </update>
+
+    <update id="freezeAccountsByClubId">
+        UPDATE `user` u
+            JOIN `user_role` ur ON ur.user_id = u.id
+            JOIN `role` r ON ur.role_id = r.id
+        SET u.status = 2,
+            u.updated_at = #{updatedAt}
+        WHERE ur.club_id = #{clubId}
+          AND ur.status = 1
+          AND ur.is_deleted = 0
+          AND r.role_code = 'CLUB_ADMIN'
+          AND r.status = 1
+          AND r.is_deleted = 0
+          AND u.is_deleted = 0
+          AND u.status = 1
+    </update>
+
+    <update id="freezeAccountsByCanceledClubs">
+        UPDATE `user` u
+            JOIN `user_role` ur ON ur.user_id = u.id
+            JOIN `role` r ON ur.role_id = r.id
+            JOIN `club` c ON ur.club_id = c.id
+        SET u.status = 2,
+            u.updated_at = #{updatedAt}
+        WHERE c.status = 5
+          AND c.is_deleted = 0
+          AND ur.status = 1
+          AND ur.is_deleted = 0
+          AND r.role_code = 'CLUB_ADMIN'
+          AND r.status = 1
+          AND r.is_deleted = 0
+          AND u.is_deleted = 0
+          AND u.status = 1
+    </update>
+
+    <update id="autoStartEvents">
+        UPDATE `event`
+        SET event_status = 6,
+            updated_at = #{now}
+        WHERE event_status = 3
+          AND start_at &lt;= #{now}
+          AND is_deleted = 0
+    </update>
+
+    <update id="autoEndEvents">
+        UPDATE `event`
+        SET event_status = 4,
+            updated_at = #{now}
+        WHERE event_status = 6
+          AND end_at &lt; #{now}
+          AND is_deleted = 0
+    </update>
+
+    <select id="countActiveClubs" resultType="long">
+        SELECT COUNT(1)
+        FROM `club`
+        WHERE is_deleted = 0
+          AND status = 2
+    </select>
+
+    <select id="countClubs" resultType="long">
+        SELECT COUNT(1)
+        FROM `club`
+        WHERE is_deleted = 0
+    </select>
+
+    <select id="countActiveUsers" resultType="long">
+        SELECT COUNT(1)
+        FROM `user` u
+        WHERE u.is_deleted = 0
+          AND u.status != 2
+    </select>
+
+    <select id="countTotalUsers" resultType="long">
+        SELECT COUNT(1)
+        FROM `user` u
+        WHERE u.is_deleted = 0
+    </select>
+
+    <select id="countPendingApprovals" resultType="long">
+        SELECT (
+            SELECT COUNT(1) FROM `club_apply` WHERE is_deleted = 0 AND apply_status IN (1, 2, 3)
+        ) + (
+            SELECT COUNT(1) FROM `club_cancel` WHERE is_deleted = 0 AND cancel_status IN (1, 2, 3)
+        ) + (
+            SELECT COUNT(1) FROM `event` WHERE is_deleted = 0 AND event_status = 2
+        )
+    </select>
+
+    <select id="countSuspiciousExpenses" resultType="long">
+        SELECT COUNT(1)
+        FROM `expense`
+        WHERE is_deleted = 0
+          AND ((amount &gt; 500 AND approve_level = 1) OR invoice_url IS NULL OR invoice_url = '')
+    </select>
+
+    <insert id="insertAuditLog">
+        INSERT INTO `audit_log` (
+            id, biz_type, biz_id, op_type, op_user_id, op_user_role, op_at, ip, user_agent, before_json, after_json, remark
+        )
+        VALUES (
+                   #{id}, #{bizType}, #{bizId}, #{opType}, #{opUserId}, #{opUserRole}, #{opAt}, #{ip}, #{userAgent}, #{beforeJson}, #{afterJson}, #{remark}
+               )
+    </insert>
+
+    <select id="isActiveClubMember" resultType="int">
+        SELECT COUNT(1)
+        FROM `club_member`
+        WHERE club_id = #{clubId}
+          AND user_id = #{userId}
+          AND member_status = 1
+          AND is_deleted = 0
+    </select>
+
+    <select id="countActiveClubMemberships" resultType="int">
+        SELECT COUNT(1)
+        FROM `club_member`
+        WHERE user_id = #{userId}
+          AND member_status = 1
+          AND is_deleted = 0
+    </select>
+
+    <select id="findExpenseAmountById" resultType="java.math.BigDecimal">
+        SELECT amount
+        FROM `expense`
+        WHERE id = #{expenseId}
+          AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <!-- ===== Event management ===== -->
+
+    <insert id="insertEvent">
+        INSERT INTO `event` (
+            id, club_id, title, content, location, start_at, end_at,
+            signup_start_at, signup_end_at, limit_count, only_member,
+            event_status, safety_plan_url, checkin_code, created_at, updated_at, created_by, updated_by, is_deleted
+        ) VALUES (
+            #{id}, #{clubId}, #{title}, #{content}, #{location}, #{startAt}, #{endAt},
+            #{signupStartAt}, #{signupEndAt}, #{limitCount}, #{onlyMember},
+            #{eventStatus}, #{safetyPlanUrl}, #{checkinCode}, #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <update id="updateEventForResubmit">
+        UPDATE `event`
+        SET title = #{title}, content = #{content}, location = #{location},
+            start_at = #{startAt}, end_at = #{endAt},
+            signup_start_at = #{signupStartAt}, signup_end_at = #{signupEndAt},
+            limit_count = #{limitCount}, only_member = #{onlyMember},
+            safety_plan_url = #{safetyPlanUrl}, checkin_code = #{checkinCode},
+            event_status = 2, reject_reason = NULL,
+            updated_by = #{updatedBy}, updated_at = #{updatedAt}
+        WHERE id = #{eventId} AND club_id = #{clubId} AND is_deleted = 0
+    </update>
+
+    <select id="listClubEvents" resultType="com.bistu.clubsystembackend.entity.response.ClubAdminEventItem">
+        SELECT e.id,
+               e.title,
+               e.location,
+               e.start_at AS start_at,
+               e.end_at AS end_at,
+               e.limit_count AS limit_count,
+               IFNULL(s.cnt, 0) AS signup_count,
+               IFNULL(ck.cnt, 0) AS checkin_count,
+               e.event_status AS event_status,
+               e.reject_reason AS reject_reason,
+               CASE WHEN es.id IS NOT NULL THEN TRUE ELSE FALSE END AS has_summary,
+               e.created_at AS created_at
+        FROM `event` e
+                 LEFT JOIN (SELECT event_id, COUNT(1) AS cnt FROM `event_signup` WHERE signup_status = 1 AND is_deleted = 0 GROUP BY event_id) s ON s.event_id = e.id
+                 LEFT JOIN (SELECT event_id, COUNT(1) AS cnt FROM `event_checkin` WHERE is_deleted = 0 GROUP BY event_id) ck ON ck.event_id = e.id
+                 LEFT JOIN `event_summary` es ON es.event_id = e.id AND es.is_deleted = 0
+        WHERE e.club_id = #{clubId} AND e.is_deleted = 0
+        <if test="eventStatus != null">
+            AND e.event_status = #{eventStatus}
+        </if>
+        ORDER BY e.created_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubEvents" resultType="long">
+        SELECT COUNT(1) FROM `event` e
+        WHERE e.club_id = #{clubId} AND e.is_deleted = 0
+        <if test="eventStatus != null">
+            AND e.event_status = #{eventStatus}
+        </if>
+    </select>
+
+    <select id="findEventDetailById" resultType="com.bistu.clubsystembackend.entity.response.EventDetailData">
+        SELECT e.id, e.club_id AS club_id, c.club_name AS club_name,
+               e.title, e.content, e.location,
+               e.start_at AS start_at, e.end_at AS end_at,
+               e.signup_start_at AS signup_start_at, e.signup_end_at AS signup_end_at,
+               e.limit_count AS limit_count, e.only_member AS only_member,
+               e.event_status AS event_status, e.safety_plan_url AS safety_plan_url,
+               e.checkin_code AS checkin_code, e.reject_reason AS reject_reason,
+               IFNULL(s.cnt, 0) AS signup_count,
+               IFNULL(ck.cnt, 0) AS checkin_count,
+               e.created_at AS created_at, e.updated_at AS updated_at
+        FROM `event` e
+                 JOIN `club` c ON c.id = e.club_id
+                 LEFT JOIN (SELECT event_id, COUNT(1) AS cnt FROM `event_signup` WHERE signup_status = 1 AND is_deleted = 0 GROUP BY event_id) s ON s.event_id = e.id
+                 LEFT JOIN (SELECT event_id, COUNT(1) AS cnt FROM `event_checkin` WHERE is_deleted = 0 GROUP BY event_id) ck ON ck.event_id = e.id
+        WHERE e.id = #{eventId} AND e.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findEventMetaById" resultType="com.bistu.clubsystembackend.entity.EventMeta">
+        SELECT id, club_id AS club_id, event_status AS event_status,
+               start_at AS start_at, end_at AS end_at
+        FROM `event`
+        WHERE id = #{eventId} AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <select id="findEventIdByCheckinCode" resultType="long">
+        SELECT id FROM `event`
+        WHERE checkin_code = #{checkinCode} AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateEventStatus">
+        UPDATE `event`
+        SET event_status = #{eventStatus},
+            reject_reason = #{rejectReason},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{eventId} AND is_deleted = 0
+    </update>
+
+    <update id="updateEventCheckinCode">
+        UPDATE `event`
+        SET checkin_code = #{checkinCode},
+            updated_at = #{updatedAt}
+        WHERE id = #{eventId} AND is_deleted = 0
+    </update>
+
+    <select id="listEventApprovals" resultType="com.bistu.clubsystembackend.entity.response.EventApprovalItem">
+        SELECT e.id, e.club_id AS club_id, c.club_name AS club_name,
+               e.title, e.location,
+               e.start_at AS start_at, e.end_at AS end_at,
+               e.limit_count AS limit_count,
+               e.event_status AS event_status,
+               e.created_at AS created_at
+        FROM `event` e
+                 JOIN `club` c ON c.id = e.club_id
+        WHERE e.is_deleted = 0
+        <if test="eventStatus != null">
+            AND e.event_status = #{eventStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (e.title LIKE CONCAT('%', #{keyword}, '%') OR c.club_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY e.created_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countEventApprovals" resultType="long">
+        SELECT COUNT(1) FROM `event` e
+                 JOIN `club` c ON c.id = e.club_id
+        WHERE e.is_deleted = 0
+        <if test="eventStatus != null">
+            AND e.event_status = #{eventStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND (e.title LIKE CONCAT('%', #{keyword}, '%') OR c.club_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </select>
+
+    <select id="listEventSignups" resultType="com.bistu.clubsystembackend.entity.response.EventSignupItem">
+        SELECT es.id, es.user_id AS user_id,
+               u.real_name AS real_name, u.student_no AS student_no,
+               es.signup_status AS signup_status, es.signup_at AS signup_at,
+               CASE WHEN ec.id IS NOT NULL THEN TRUE ELSE FALSE END AS checked_in,
+               ec.checkin_at AS checkin_at
+        FROM `event_signup` es
+                 JOIN `user` u ON u.id = es.user_id
+                 LEFT JOIN `event_checkin` ec ON ec.event_id = es.event_id AND ec.user_id = es.user_id AND ec.is_deleted = 0
+        WHERE es.event_id = #{eventId} AND es.is_deleted = 0 AND es.signup_status = 1
+        ORDER BY es.signup_at ASC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countEventSignups" resultType="long">
+        SELECT COUNT(1) FROM `event_signup`
+        WHERE event_id = #{eventId} AND signup_status = 1 AND is_deleted = 0
+    </select>
+
+    <insert id="insertEventCheckin">
+        INSERT INTO `event_checkin` (
+            id, event_id, user_id, checkin_type, checkin_at, device_no,
+            created_at, updated_at, created_by, updated_by, is_deleted
+        ) VALUES (
+            #{id}, #{eventId}, #{userId}, #{checkinType}, #{checkinAt}, #{deviceNo},
+            #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <select id="hasCheckedIn" resultType="int">
+        SELECT COUNT(1) FROM `event_checkin`
+        WHERE event_id = #{eventId} AND user_id = #{userId} AND is_deleted = 0
+    </select>
+
+    <update id="cancelEventCheckin">
+        UPDATE `event_checkin`
+        SET is_deleted = 1, updated_at = #{updatedAt}
+        WHERE event_id = #{eventId} AND user_id = #{userId} AND is_deleted = 0
+    </update>
+
+    <update id="restoreEventCheckin">
+        UPDATE `event_checkin`
+        SET is_deleted = 0, checkin_type = #{checkinType}, checkin_at = #{checkinAt},
+            device_no = #{deviceNo}, updated_by = #{updatedBy}, updated_at = #{updatedAt}
+        WHERE event_id = #{eventId} AND user_id = #{userId} AND is_deleted = 1
+        LIMIT 1
+    </update>
+
+    <select id="findEventSummaryByEventId" resultType="com.bistu.clubsystembackend.entity.response.EventSummaryData">
+        SELECT es.id, es.event_id AS eventId,
+               e.title AS eventTitle, c.club_name AS clubName,
+               es.summary_text AS summaryText, es.summary_images AS summaryImagesJson,
+               es.feedback_score AS feedbackScore,
+               es.issue_reflection AS issueReflection, es.attachment_url AS attachmentUrl,
+               es.created_at AS createdAt
+        FROM `event_summary` es
+                 JOIN `event` e ON e.id = es.event_id
+                 JOIN `club` c ON c.id = e.club_id
+        WHERE es.event_id = #{eventId} AND es.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <insert id="insertEventSummary">
+        INSERT INTO `event_summary` (
+            id, event_id, summary_text, summary_images, feedback_score, issue_reflection, attachment_url,
+            created_at, updated_at, created_by, updated_by, is_deleted
+        ) VALUES (
+            #{id}, #{eventId}, #{summaryText}, #{summaryImages}, #{feedbackScore}, #{issueReflection}, #{attachmentUrl},
+            #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <update id="updateEventSummary">
+        UPDATE `event_summary`
+        SET summary_text = #{summaryText}, summary_images = #{summaryImages},
+            feedback_score = #{feedbackScore},
+            issue_reflection = #{issueReflection}, attachment_url = #{attachmentUrl},
+            updated_by = #{updatedBy}, updated_at = #{updatedAt}
+        WHERE event_id = #{eventId} AND is_deleted = 0
+    </update>
+
+    <select id="listEventSummaries" resultType="com.bistu.clubsystembackend.entity.response.EventSummaryData">
+        SELECT es.id, es.event_id AS eventId,
+               e.title AS eventTitle, c.club_name AS clubName,
+               es.summary_text AS summaryText, es.summary_images AS summaryImagesJson,
+               es.feedback_score AS feedbackScore,
+               es.issue_reflection AS issueReflection, es.attachment_url AS attachmentUrl,
+               es.created_at AS createdAt
+        FROM `event_summary` es
+                 JOIN `event` e ON e.id = es.event_id AND e.is_deleted = 0
+                 JOIN `club` c ON c.id = e.club_id
+        WHERE es.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (e.title LIKE CONCAT('%', #{keyword}, '%') OR c.club_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY es.created_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countEventSummaries" resultType="long">
+        SELECT COUNT(1)
+        FROM `event_summary` es
+                 JOIN `event` e ON e.id = es.event_id AND e.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+                 JOIN `club` c ON c.id = e.club_id
+        </if>
+        WHERE es.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (e.title LIKE CONCAT('%', #{keyword}, '%') OR c.club_name LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </select>
+
+    <update id="updateEventSignupStatus">
+        UPDATE `event_signup`
+        SET signup_status = #{signupStatus}, updated_at = #{updatedAt}
+        WHERE event_id = #{eventId} AND user_id = #{userId} AND is_deleted = 0
+    </update>
+
+    <update id="autoEndPastEvents">
+        UPDATE `event`
+        SET event_status = 4, updated_at = #{now}
+        WHERE event_status = 6 AND end_at &lt; #{now} AND is_deleted = 0
+    </update>
+
+    <select id="listMyJoinedClubs" resultType="com.bistu.clubsystembackend.entity.response.MyJoinedClubItem">
+        SELECT c.id AS club_id,
+               c.club_name AS club_name,
+               c.category,
+               c.purpose,
+               cp.position_name AS position_name,
+               cm.join_at AS join_at
+        FROM `club_member` cm
+                 JOIN `club` c ON c.id = cm.club_id AND c.is_deleted = 0
+                 LEFT JOIN `club_position` cp ON cp.id = cm.position_id AND cp.is_deleted = 0
+        WHERE cm.user_id = #{userId}
+          AND cm.member_status = 1
+          AND cm.is_deleted = 0
+          AND c.status != 5
+        ORDER BY cm.join_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countMyJoinedClubs" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_member` cm
+                 JOIN `club` c ON c.id = cm.club_id AND c.is_deleted = 0
+        WHERE cm.user_id = #{userId}
+          AND cm.member_status = 1
+          AND cm.is_deleted = 0
+          AND c.status != 5
+    </select>
+
+    <!-- ===== Finance management ===== -->
+
+    <insert id="insertIncome">
+        INSERT INTO `income` (
+            id, club_id, income_type, amount, occur_at, proof_url, source_desc,
+            created_at, updated_at, created_by, updated_by, is_deleted
+        ) VALUES (
+            #{id}, #{clubId}, #{incomeType}, #{amount}, #{occurAt}, #{proofUrl}, #{sourceDesc},
+            #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <select id="listClubIncomes" resultType="com.bistu.clubsystembackend.entity.response.IncomeDetailData">
+        SELECT i.id, i.club_id,
+               i.income_type,
+               CASE
+                   WHEN i.income_type = 1 THEN '学校拨款'
+                   WHEN i.income_type = 2 THEN '赞助收入'
+                   WHEN i.income_type = 3 THEN '成员会费'
+                   ELSE '其他'
+               END AS income_type_name,
+               i.amount, i.occur_at, i.proof_url, i.source_desc, i.created_at
+        FROM `income` i
+        WHERE i.club_id = #{clubId} AND i.is_deleted = 0
+        ORDER BY i.occur_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubIncomes" resultType="long">
+        SELECT COUNT(1) FROM `income`
+        WHERE club_id = #{clubId} AND is_deleted = 0
+    </select>
+
+    <insert id="insertExpense">
+        INSERT INTO `expense` (
+            id, club_id, event_id, category, amount, payee_name, payee_account,
+            invoice_url, expense_desc, approve_level, expense_status,
+            created_at, updated_at, created_by, updated_by, is_deleted
+        ) VALUES (
+            #{id}, #{clubId}, #{eventId}, #{category}, #{amount}, #{payeeName}, #{payeeAccount},
+            #{invoiceUrl}, #{expenseDesc}, #{approveLevel}, #{expenseStatus},
+            #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <select id="listClubExpenses" resultType="com.bistu.clubsystembackend.entity.response.ExpenseDetailData">
+        SELECT e.id, e.club_id, c.club_name, e.event_id, e.category, e.amount,
+               e.payee_name, e.payee_account, e.invoice_url, e.expense_desc,
+               e.approve_level, e.expense_status, e.reject_reason,
+               e.created_at, e.updated_at
+        FROM `expense` e
+                 JOIN `club` c ON c.id = e.club_id
+        WHERE e.club_id = #{clubId} AND e.is_deleted = 0
+        <if test="expenseStatus != null">
+            AND e.expense_status = #{expenseStatus}
+        </if>
+        ORDER BY e.created_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubExpenses" resultType="long">
+        SELECT COUNT(1) FROM `expense` e
+        WHERE e.club_id = #{clubId} AND e.is_deleted = 0
+        <if test="expenseStatus != null">
+            AND e.expense_status = #{expenseStatus}
+        </if>
+    </select>
+
+    <select id="findExpenseDetailById" resultType="com.bistu.clubsystembackend.entity.response.ExpenseDetailData">
+        SELECT e.id, e.club_id, c.club_name, e.event_id, e.category, e.amount,
+               e.payee_name, e.payee_account, e.invoice_url, e.expense_desc,
+               e.approve_level, e.expense_status, e.reject_reason,
+               u.real_name AS created_by_name,
+               e.created_at, e.updated_at
+        FROM `expense` e
+                 JOIN `club` c ON c.id = e.club_id
+                 LEFT JOIN `user` u ON u.id = e.created_by
+        WHERE e.id = #{expenseId} AND e.is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <update id="updateExpenseStatus">
+        UPDATE `expense`
+        SET expense_status = #{expenseStatus},
+            reject_reason = #{rejectReason},
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{expenseId} AND is_deleted = 0
+    </update>
+
+    <update id="resubmitExpense">
+        UPDATE `expense`
+        SET category = #{category},
+            amount = #{amount},
+            payee_name = #{payeeName},
+            payee_account = #{payeeAccount},
+            invoice_url = #{invoiceUrl},
+            expense_desc = #{expenseDesc},
+            approve_level = #{approveLevel},
+            expense_status = #{expenseStatus},
+            reject_reason = NULL,
+            updated_by = #{updatedBy},
+            updated_at = #{updatedAt}
+        WHERE id = #{expenseId} AND is_deleted = 0 AND expense_status = 3
+    </update>
+
+    <select id="sumPendingExpensesByClub" resultType="java.math.BigDecimal">
+        SELECT COALESCE(SUM(amount), 0)
+        FROM `expense`
+        WHERE club_id = #{clubId} AND expense_status = 1 AND is_deleted = 0
+        <if test="excludeExpenseId != null">
+            AND id != #{excludeExpenseId}
+        </if>
+    </select>
+
+    <select id="listPendingExpenseApprovals" resultType="com.bistu.clubsystembackend.entity.response.ExpenseApprovalItem">
+        SELECT e.id, e.club_id, c.club_name, e.amount, e.category, e.expense_desc,
+               e.expense_status, e.invoice_url, e.created_at
+        FROM `expense` e
+                 JOIN `club` c ON c.id = e.club_id
+        WHERE e.approve_level = 2 AND e.expense_status = 1 AND e.is_deleted = 0 AND c.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (c.club_name LIKE CONCAT('%', #{keyword}, '%') OR e.expense_desc LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY e.created_at ASC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countPendingExpenseApprovals" resultType="long">
+        SELECT COUNT(1)
+        FROM `expense` e
+                 JOIN `club` c ON c.id = e.club_id
+        WHERE e.approve_level = 2 AND e.expense_status = 1 AND e.is_deleted = 0 AND c.is_deleted = 0
+        <if test="keyword != null and keyword != ''">
+            AND (c.club_name LIKE CONCAT('%', #{keyword}, '%') OR e.expense_desc LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </select>
+
+    <insert id="insertLedger">
+        INSERT INTO `ledger` (
+            id, club_id, biz_type, biz_id, change_amount, balance_after, occur_at,
+            created_at, updated_at, created_by, updated_by, is_deleted
+        ) VALUES (
+            #{id}, #{clubId}, #{bizType}, #{bizId}, #{changeAmount}, #{balanceAfter}, #{occurAt},
+            #{now}, #{now}, #{createdBy}, #{updatedBy}, 0
+        )
+    </insert>
+
+    <select id="listClubLedger" resultType="com.bistu.clubsystembackend.entity.response.LedgerItem">
+        SELECT l.id, l.club_id, l.biz_type,
+               CASE WHEN l.biz_type = 1 THEN '收入' ELSE '支出' END AS biz_type_name,
+               l.biz_id, l.change_amount, l.balance_after, l.occur_at
+        FROM `ledger` l
+        WHERE l.club_id = #{clubId} AND l.is_deleted = 0
+        <if test="bizType != null">
+            AND l.biz_type = #{bizType}
+        </if>
+        <if test="startTime != null">
+            AND l.occur_at &gt;= #{startTime}
+        </if>
+        <if test="endTime != null">
+            AND l.occur_at &lt;= #{endTime}
+        </if>
+        ORDER BY l.occur_at DESC, l.id DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubLedger" resultType="long">
+        SELECT COUNT(1) FROM `ledger` l
+        WHERE l.club_id = #{clubId} AND l.is_deleted = 0
+        <if test="bizType != null">
+            AND l.biz_type = #{bizType}
+        </if>
+        <if test="startTime != null">
+            AND l.occur_at &gt;= #{startTime}
+        </if>
+        <if test="endTime != null">
+            AND l.occur_at &lt;= #{endTime}
+        </if>
+    </select>
+
+    <select id="findLatestClubBalance" resultType="java.math.BigDecimal">
+        SELECT balance_after FROM `ledger`
+        WHERE club_id = #{clubId} AND is_deleted = 0
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+    </select>
+
+    <select id="sumClubIncomeByYear" resultType="java.math.BigDecimal">
+        SELECT COALESCE(SUM(amount), 0) FROM `income`
+        WHERE club_id = #{clubId} AND is_deleted = 0 AND YEAR(occur_at) = #{year}
+    </select>
+
+    <select id="sumClubExpenseByYear" resultType="java.math.BigDecimal">
+        SELECT COALESCE(SUM(amount), 0) FROM `expense`
+        WHERE club_id = #{clubId} AND is_deleted = 0 AND expense_status = 2 AND YEAR(created_at) = #{year}
+    </select>
+
+    <select id="monthlyIncomeStats" resultType="com.bistu.clubsystembackend.entity.response.FinanceAuditReportData$MonthlyFinanceStat">
+        SELECT MONTH(occur_at) AS month, COALESCE(SUM(amount), 0) AS income, 0 AS expense
+        FROM `income`
+        WHERE club_id = #{clubId} AND is_deleted = 0 AND YEAR(occur_at) = #{year}
+        GROUP BY MONTH(occur_at)
+        ORDER BY month
+    </select>
+
+    <select id="monthlyExpenseStats" resultType="com.bistu.clubsystembackend.entity.response.FinanceAuditReportData$MonthlyFinanceStat">
+        SELECT MONTH(created_at) AS month, 0 AS income, COALESCE(SUM(amount), 0) AS expense
+        FROM `expense`
+        WHERE club_id = #{clubId} AND is_deleted = 0 AND expense_status = 2 AND YEAR(created_at) = #{year}
+        GROUP BY MONTH(created_at)
+        ORDER BY month
+    </select>
+
+    <select id="categoryExpenseStats" resultType="com.bistu.clubsystembackend.entity.response.FinanceAuditReportData$CategoryExpenseStat">
+        SELECT COALESCE(category, '未分类') AS category, SUM(amount) AS amount
+        FROM `expense`
+        WHERE club_id = #{clubId} AND is_deleted = 0 AND expense_status = 2 AND YEAR(created_at) = #{year}
+        GROUP BY category
+        ORDER BY amount DESC
+    </select>
+
+    <select id="countAnomalyExpensesByClubAndYear" resultType="long">
+        SELECT COUNT(1) FROM `expense`
+        WHERE club_id = #{clubId} AND is_deleted = 0 AND YEAR(created_at) = #{year}
+          AND ((amount &gt; 500 AND approve_level = 1) OR invoice_url IS NULL OR invoice_url = '')
+    </select>
+
+    <select id="listAnomalyExpenses" resultType="com.bistu.clubsystembackend.entity.response.AnomalyExpenseItem">
+        SELECT e.id, e.club_id, c.club_name, e.amount, e.category, e.expense_desc,
+               e.approve_level, e.expense_status, e.invoice_url, e.reject_reason, e.created_at,
+               CASE
+                   WHEN (e.amount &gt; 500 AND e.approve_level = 1) AND (e.invoice_url IS NULL OR e.invoice_url = '')
+                       THEN '金额超500未经学校审批且缺少发票'
+                   WHEN e.amount &gt; 500 AND e.approve_level = 1
+                       THEN '金额超500未经学校审批'
+                   WHEN e.invoice_url IS NULL OR e.invoice_url = ''
+                       THEN '缺少发票凭证'
+                   ELSE '未知异常'
+               END AS anomaly_reason
+        FROM `expense` e
+                 JOIN `club` c ON c.id = e.club_id AND c.is_deleted = 0
+        WHERE e.is_deleted = 0
+          AND ((e.amount &gt; 500 AND e.approve_level = 1) OR e.invoice_url IS NULL OR e.invoice_url = '')
+        <if test="keyword != null and keyword != ''">
+            AND (c.club_name LIKE CONCAT('%', #{keyword}, '%') OR e.expense_desc LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+        ORDER BY e.created_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countAnomalyExpenses" resultType="long">
+        SELECT COUNT(1)
+        FROM `expense` e
+                 JOIN `club` c ON c.id = e.club_id AND c.is_deleted = 0
+        WHERE e.is_deleted = 0
+          AND ((e.amount &gt; 500 AND e.approve_level = 1) OR e.invoice_url IS NULL OR e.invoice_url = '')
+        <if test="keyword != null and keyword != ''">
+            AND (c.club_name LIKE CONCAT('%', #{keyword}, '%') OR e.expense_desc LIKE CONCAT('%', #{keyword}, '%'))
+        </if>
+    </select>
+
+    <select id="findClubNameById" resultType="string">
+        SELECT club_name FROM `club`
+        WHERE id = #{clubId} AND is_deleted = 0
+        LIMIT 1
+    </select>
+
+    <!-- ========== Statistics ========== -->
+
+    <!-- Club statistics -->
+    <select id="countClubsByCategory" resultType="com.bistu.clubsystembackend.entity.response.ClubStatisticsData$CategoryCount">
+        SELECT category, COUNT(1) AS count
+        FROM `club` WHERE is_deleted = 0 AND status IN (1,2,3)
+        GROUP BY category ORDER BY count DESC
+    </select>
+
+    <select id="countClubsByStatus" resultType="com.bistu.clubsystembackend.entity.response.ClubStatisticsData$StatusCount">
+        SELECT CASE status
+                   WHEN 1 THEN '筹建'
+                   WHEN 2 THEN '正常'
+                   WHEN 3 THEN '整改/冻结'
+                   WHEN 4 THEN '待注销'
+                   WHEN 5 THEN '已注销'
+                   ELSE '未知'
+               END AS status_name,
+               COUNT(1) AS count
+        FROM `club` WHERE is_deleted = 0
+        GROUP BY status ORDER BY status
+    </select>
+
+    <select id="countNewClubsByYear" resultType="long">
+        SELECT COUNT(1) FROM `club`
+        WHERE is_deleted = 0 AND YEAR(created_at) = #{year}
+    </select>
+
+    <select id="countCancelledClubsByYear" resultType="long">
+        SELECT COUNT(1) FROM `club`
+        WHERE is_deleted = 0 AND status = 5 AND YEAR(updated_at) = #{year}
+    </select>
+
+    <select id="countTotalStudents" resultType="long">
+        SELECT COUNT(DISTINCT ur.user_id)
+        FROM `user_role` ur
+                 JOIN `role` r ON r.id = ur.role_id AND r.role_code = 'STUDENT'
+                 JOIN `user` u ON u.id = ur.user_id AND u.is_deleted = 0 AND u.status = 1
+        WHERE ur.is_deleted = 0 AND ur.status = 1
+    </select>
+
+    <select id="countJoinedStudents" resultType="long">
+        SELECT COUNT(DISTINCT user_id) FROM `club_member`
+        WHERE is_deleted = 0 AND member_status = 1
+    </select>
+
+    <select id="listTopActiveClubs" resultType="com.bistu.clubsystembackend.entity.response.ClubStatisticsData$ActiveClub">
+        SELECT c.club_name,
+               COALESCE(m.cnt, 0) AS member_count,
+               COALESCE(e.cnt, 0) AS event_count
+        FROM `club` c
+                 LEFT JOIN (SELECT club_id, COUNT(1) AS cnt FROM `club_member`
+                            WHERE is_deleted = 0 AND member_status = 1 GROUP BY club_id) m ON m.club_id = c.id
+                 LEFT JOIN (SELECT club_id, COUNT(1) AS cnt FROM `event`
+                            WHERE is_deleted = 0 AND YEAR(start_at) = #{year} AND event_status IN (3,4,6) GROUP BY club_id) e ON e.club_id = c.id
+        WHERE c.is_deleted = 0 AND c.status IN (1,2,3)
+        ORDER BY event_count DESC, member_count DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- Event statistics -->
+    <select id="countEventsByYear" resultType="long">
+        SELECT COUNT(1) FROM `event`
+        WHERE is_deleted = 0 AND YEAR(start_at) = #{year} AND event_status IN (3,4,6)
+    </select>
+
+    <select id="countTotalSignupsByYear" resultType="long">
+        SELECT COUNT(1) FROM `event_signup` es
+                 JOIN `event` e ON e.id = es.event_id
+        WHERE es.is_deleted = 0 AND es.signup_status = 1
+          AND YEAR(e.start_at) = #{year} AND e.event_status IN (3,4,6)
+    </select>
+
+    <select id="monthlyEventStatsByYear" resultType="com.bistu.clubsystembackend.entity.response.EventStatisticsData$MonthlyEventStat">
+        SELECT MONTH(e.start_at) AS month,
+               COUNT(DISTINCT e.id) AS event_count,
+               COUNT(es.id) AS signup_count
+        FROM `event` e
+                 LEFT JOIN `event_signup` es ON es.event_id = e.id AND es.is_deleted = 0 AND es.signup_status = 1
+        WHERE e.is_deleted = 0 AND YEAR(e.start_at) = #{year} AND e.event_status IN (3,4,6)
+        GROUP BY MONTH(e.start_at)
+        ORDER BY month
+    </select>
+
+    <select id="listTopEventClubs" resultType="com.bistu.clubsystembackend.entity.response.EventStatisticsData$TopEventClub">
+        SELECT c.club_name, COUNT(e.id) AS event_count
+        FROM `event` e JOIN `club` c ON c.id = e.club_id
+        WHERE e.is_deleted = 0 AND YEAR(e.start_at) = #{year} AND e.event_status IN (3,4,6)
+        GROUP BY e.club_id, c.club_name
+        ORDER BY event_count DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="countEventsByStatusAndYear" resultType="com.bistu.clubsystembackend.entity.response.EventStatisticsData$StatusCount">
+        SELECT CASE event_status
+                   WHEN 1 THEN '草稿'
+                   WHEN 2 THEN '待审核'
+                   WHEN 3 THEN '报名中'
+                   WHEN 4 THEN '已结束'
+                   WHEN 5 THEN '已驳回'
+                   WHEN 6 THEN '进行中'
+                   ELSE '未知'
+               END AS status_name,
+               COUNT(1) AS count
+        FROM `event` WHERE is_deleted = 0 AND YEAR(start_at) = #{year}
+        GROUP BY event_status ORDER BY event_status
+    </select>
+
+    <!-- Finance statistics -->
+    <select id="sumIncomeByTypeAndYear" resultType="com.bistu.clubsystembackend.entity.response.FinanceStatisticsData$IncomeByType">
+        SELECT CASE income_type
+                   WHEN 1 THEN '学校拨款'
+                   WHEN 2 THEN '赞助收入'
+                   WHEN 3 THEN '成员会费'
+                   ELSE '其他'
+               END AS type_name,
+               COALESCE(SUM(amount), 0) AS amount
+        FROM `income` WHERE is_deleted = 0 AND YEAR(occur_at) = #{year}
+        GROUP BY income_type ORDER BY income_type
+    </select>
+
+    <select id="sumTotalExpenseByYear" resultType="java.math.BigDecimal">
+        SELECT COALESCE(SUM(amount), 0) FROM `expense`
+        WHERE is_deleted = 0 AND expense_status IN (2,4) AND YEAR(created_at) = #{year}
+    </select>
+
+    <select id="listClubFinanceSummary" resultType="com.bistu.clubsystembackend.entity.response.FinanceStatisticsData$ClubFinanceItem">
+        SELECT c.club_name,
+               COALESCE(i.total, 0) AS income,
+               COALESCE(ex.total, 0) AS expense,
+               COALESCE(i.total, 0) - COALESCE(ex.total, 0) AS balance,
+               COALESCE(ev.cnt, 0) AS event_count,
+               CASE WHEN COALESCE(ev.cnt, 0) > 0
+                    THEN ROUND(COALESCE(ex.total, 0) / ev.cnt, 2)
+                    ELSE 0 END AS efficiency
+        FROM `club` c
+                 LEFT JOIN (SELECT club_id, SUM(amount) AS total FROM `income`
+                            WHERE is_deleted = 0 AND YEAR(occur_at) = #{year} GROUP BY club_id) i ON i.club_id = c.id
+                 LEFT JOIN (SELECT club_id, SUM(amount) AS total FROM `expense`
+                            WHERE is_deleted = 0 AND expense_status IN (2,4) AND YEAR(created_at) = #{year} GROUP BY club_id) ex ON ex.club_id = c.id
+                 LEFT JOIN (SELECT club_id, COUNT(1) AS cnt FROM `event`
+                            WHERE is_deleted = 0 AND event_status IN (3,4,6) AND YEAR(start_at) = #{year} GROUP BY club_id) ev ON ev.club_id = c.id
+        WHERE c.is_deleted = 0 AND c.status IN (1,2,3)
+          AND (i.total IS NOT NULL OR ex.total IS NOT NULL)
+        ORDER BY income DESC
+    </select>
+
+    <select id="monthlyFinanceStatsByYear" resultType="com.bistu.clubsystembackend.entity.response.FinanceStatisticsData$MonthlyFinance">
+        SELECT m.month,
+               COALESCE(i.amount, 0) AS income,
+               COALESCE(e.amount, 0) AS expense
+        FROM (SELECT 1 AS month UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6
+              UNION SELECT 7 UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11 UNION SELECT 12) m
+                 LEFT JOIN (SELECT MONTH(occur_at) AS month, SUM(amount) AS amount FROM `income`
+                            WHERE is_deleted = 0 AND YEAR(occur_at) = #{year} GROUP BY MONTH(occur_at)) i ON i.month = m.month
+                 LEFT JOIN (SELECT MONTH(created_at) AS month, SUM(amount) AS amount FROM `expense`
+                            WHERE is_deleted = 0 AND expense_status IN (2,4) AND YEAR(created_at) = #{year} GROUP BY MONTH(created_at)) e ON e.month = m.month
+        ORDER BY m.month
+    </select>
+
+</mapper>
