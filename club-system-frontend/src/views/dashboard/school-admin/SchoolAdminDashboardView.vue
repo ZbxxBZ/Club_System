@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onBeforeUnmount, nextTick, reactive, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../../stores/auth'
 import {
@@ -35,6 +35,11 @@ import {
   getClubStatisticsApi,
   getEventStatisticsApi,
   getFinanceStatisticsApi,
+  getReviewWindowStatusApi,
+  updateReviewWindowApi,
+  getReviewsForApprovalApi,
+  getReviewDetailApi,
+  decideReviewApi,
 } from '../../../api/user-permission'
 import * as echarts from 'echarts'
 import * as XLSX from 'xlsx'
@@ -52,6 +57,11 @@ const userFilters = reactive({
   keyword: '',
   roleCode: '',
   status: '',
+  clubId: '',
+})
+watch(() => [userFilters.roleCode, userFilters.status, userFilters.clubId], () => {
+  userPagination.pageNum = 1
+  loadUsers()
 })
 const userRoleOptions = [
   { label: '学生', value: 'STUDENT' },
@@ -116,6 +126,8 @@ const stats = reactive({
   totalUserCount: 0,
   pendingApprovalCount: 0,
   suspiciousExpenseCount: 0,
+  monthEventCount: 0,
+  registeredMemberCount: 0,
 })
 const eventApprovalList = ref([])
 const eventApprovalLoading = ref(false)
@@ -130,6 +142,15 @@ const eventManageLoading = ref(false)
 const eventManageSearch = reactive({ keyword: '', eventStatus: null })
 const eventManageDetailDialog = reactive({ visible: false, event: null })
 const eventManageSummaryDialog = reactive({ visible: false, summary: null })
+
+// -- 统一列表分页状态 --
+const userPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const clubApprovalPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const clubCancelPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const managedClubPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const eventApprovalPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const eventManagePagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const eventSummaryPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
 
 // -- Finance: expense approval --
 const expenseApprovalList = ref([])
@@ -405,12 +426,13 @@ const getEventStatusClass = (status) => {
 const loadEventApprovals = async () => {
   eventApprovalLoading.value = true
   try {
-    const params = { pageNum: 1, pageSize: 50 }
+    const params = { pageNum: eventApprovalPagination.pageNum, pageSize: eventApprovalPagination.pageSize }
     if (eventApprovalSearch.keyword.trim()) params.keyword = eventApprovalSearch.keyword.trim()
     if (eventApprovalSearch.eventStatus !== null) params.eventStatus = eventApprovalSearch.eventStatus
     const res = await getEventApprovalQueueApi(params)
     const data = getBizData(res)
     eventApprovalList.value = Array.isArray(data?.records) ? data.records : []
+    eventApprovalPagination.total = Number(data?.total ?? eventApprovalList.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || '活动审批列表加载失败'
   } finally { eventApprovalLoading.value = false }
@@ -437,6 +459,7 @@ const handleEventDecision = async (action) => {
     feedback.value = action === 'APPROVE' ? '活动已通过审批' : '活动已驳回'
     eventApprovalDetailDialog.visible = false
     await loadEventApprovals()
+    loadPendingCounts()
   } catch (error) {
     feedback.value = error?.response?.data?.message || '审批操作失败'
   } finally { eventDecisionLoading.value = false }
@@ -445,9 +468,10 @@ const handleEventDecision = async (action) => {
 const loadEventSummaries = async () => {
   eventSummaryLoading.value = true
   try {
-    const res = await getEventSummaryListApi({ pageNum: 1, pageSize: 50 })
+    const res = await getEventSummaryListApi({ pageNum: eventSummaryPagination.pageNum, pageSize: eventSummaryPagination.pageSize })
     const data = getBizData(res)
     eventSummaryList.value = Array.isArray(data?.records) ? data.records : []
+    eventSummaryPagination.total = Number(data?.total ?? eventSummaryList.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || '活动总结列表加载失败'
   } finally { eventSummaryLoading.value = false }
@@ -461,12 +485,13 @@ const openEventSummaryView = (summary) => {
 const loadEventManageList = async () => {
   eventManageLoading.value = true
   try {
-    const params = { pageNum: 1, pageSize: 50 }
+    const params = { pageNum: eventManagePagination.pageNum, pageSize: eventManagePagination.pageSize }
     if (eventManageSearch.keyword.trim()) params.keyword = eventManageSearch.keyword.trim()
     if (eventManageSearch.eventStatus !== null) params.eventStatus = eventManageSearch.eventStatus
     const res = await getEventApprovalQueueApi(params)
     const data = getBizData(res)
     eventManageList.value = Array.isArray(data?.records) ? data.records : []
+    eventManagePagination.total = Number(data?.total ?? eventManageList.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || '活动管理列表加载失败'
   } finally { eventManageLoading.value = false }
@@ -695,11 +720,12 @@ const loadData = async () => {
   try {
     const [userRes, statsRes] = await Promise.all([
       getUserListApi({
-        pageNum: 1,
-        pageSize: 10,
+        pageNum: userPagination.pageNum,
+        pageSize: userPagination.pageSize,
         keyword: userFilters.keyword.trim(),
         roleCode: userFilters.roleCode,
         status: userFilters.status,
+        clubId: userFilters.clubId || undefined,
       }),
       getAuditStatsApi({}),
     ])
@@ -708,6 +734,7 @@ const loadData = async () => {
 
     const rawUsers = Array.isArray(userData?.records) ? userData.records : Array.isArray(userData) ? userData : []
     users.value = rawUsers.map((user) => normalizeUserRecord(user))
+    userPagination.total = Number(userData?.total ?? users.value.length) || 0
     const validIds = new Set(users.value.map((user) => user.id))
     selectedUserIds.value = selectedUserIds.value.filter((id) => validIds.has(id))
     // Keep pending approval count from overview API; dedicated approval queue UI is replaced by club management panel.
@@ -718,6 +745,8 @@ const loadData = async () => {
     stats.totalUserCount = statsData.totalUserCount ?? statsData.userCount ?? 0
     stats.pendingApprovalCount = statsData.pendingApprovalCount ?? 0
     stats.suspiciousExpenseCount = statsData.suspiciousExpenseCount ?? 0
+    stats.monthEventCount = statsData.monthEventCount ?? 0
+    stats.registeredMemberCount = statsData.registeredMemberCount ?? 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '数据加载失败'
   } finally {
@@ -725,17 +754,39 @@ const loadData = async () => {
   }
 }
 
+const loadUsers = async () => {
+  try {
+    const res = await getUserListApi({
+      pageNum: userPagination.pageNum,
+      pageSize: userPagination.pageSize,
+      keyword: userFilters.keyword.trim(),
+      roleCode: userFilters.roleCode,
+      status: userFilters.status,
+      clubId: userFilters.clubId || undefined,
+    })
+    const userData = getBizData(res)
+    const rawUsers = Array.isArray(userData?.records) ? userData.records : Array.isArray(userData) ? userData : []
+    users.value = rawUsers.map((user) => normalizeUserRecord(user))
+    userPagination.total = Number(userData?.total ?? users.value.length) || 0
+    const validIds = new Set(users.value.map((user) => user.id))
+    selectedUserIds.value = selectedUserIds.value.filter((id) => validIds.has(id))
+  } catch (error) {
+    feedback.value = error?.response?.data?.message || error?.message || '用户列表加载失败'
+  }
+}
+
 const loadClubList = async () => {
   clubLoading.value = true
   try {
     const response = await getClubApprovalQueueApi({
-      pageNum: 1,
-      pageSize: 50,
+      pageNum: clubApprovalPagination.pageNum,
+      pageSize: clubApprovalPagination.pageSize,
       keyword: clubFilters.keyword.trim(),
       applyStatus: clubFilters.applyStatus ? Number(clubFilters.applyStatus) : undefined,
     })
     const data = getBizData(response)
     clubs.value = Array.isArray(data?.records) ? data.records : Array.isArray(data) ? data : []
+    clubApprovalPagination.total = Number(data?.total ?? clubs.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '社团审批列表加载失败'
   } finally {
@@ -747,13 +798,14 @@ const loadClubCancelList = async () => {
   cancelLoading.value = true
   try {
     const response = await getClubCancelApprovalQueueApi({
-      pageNum: 1,
-      pageSize: 50,
+      pageNum: clubCancelPagination.pageNum,
+      pageSize: clubCancelPagination.pageSize,
       keyword: cancelFilters.keyword.trim(),
       cancelStatus: cancelFilters.cancelStatus ? Number(cancelFilters.cancelStatus) : undefined,
     })
     const data = getBizData(response)
     cancelClubs.value = Array.isArray(data?.records) ? data.records : Array.isArray(data) ? data : []
+    clubCancelPagination.total = Number(data?.total ?? cancelClubs.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '社团注销审核列表加载失败'
   } finally {
@@ -765,13 +817,14 @@ const loadManagedClubs = async () => {
   manageLoading.value = true
   try {
     const response = await getSchoolClubManageListApi({
-      pageNum: 1,
-      pageSize: 50,
+      pageNum: managedClubPagination.pageNum,
+      pageSize: managedClubPagination.pageSize,
       keyword: manageFilters.keyword.trim(),
       category: manageFilters.category.trim(),
     })
     const data = getBizData(response)
     managedClubs.value = Array.isArray(data?.records) ? data.records : Array.isArray(data) ? data : []
+    managedClubPagination.total = Number(data?.total ?? managedClubs.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '社团管理列表加载失败'
   } finally {
@@ -934,6 +987,7 @@ const goNextApplyStep = async (record) => {
     getBizData(response)
     feedback.value = `状态已更新为${getApplyStatusText(nextStatus)}`
     await loadClubList()
+    loadPendingCounts()
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '推进审批流程失败'
   }
@@ -955,6 +1009,7 @@ const rejectApply = async (record) => {
     getBizData(response)
     feedback.value = '申请已驳回'
     await loadClubList()
+    loadPendingCounts()
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '驳回申请失败'
   }
@@ -993,6 +1048,7 @@ const goNextCancelStep = async (record) => {
     getBizData(response)
     feedback.value = `注销状态已更新为${getCancelStatusText(nextStatus)}`
     await loadClubCancelList()
+    loadPendingCounts()
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '推进社团注销审核流程失败'
   }
@@ -1014,6 +1070,7 @@ const rejectCancelApply = async (record) => {
     getBizData(response)
     feedback.value = '社团注销申请已驳回'
     await loadClubCancelList()
+    loadPendingCounts()
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '驳回社团注销申请失败'
   }
@@ -1191,6 +1248,7 @@ const confirmReject = async () => {
     rejectDialogVisible.value = false
     expenseDetailVisible.value = false
     await loadExpenseApprovals()
+    loadPendingCounts()
   } catch (error) {
     feedback.value = error?.response?.data?.message || '驳回操作失败'
   } finally { expenseDecisionLoading.value = false }
@@ -1207,6 +1265,7 @@ const submitExpenseDecision = async (action) => {
     feedback.value = '经费申请已通过'
     expenseDetailVisible.value = false
     await loadExpenseApprovals()
+    loadPendingCounts()
   } catch (error) {
     feedback.value = error?.response?.data?.message || '审批操作失败'
   } finally { expenseDecisionLoading.value = false }
@@ -1273,7 +1332,7 @@ const renderFinanceCharts = () => {
       xAxis: { type: 'category', data: months },
       yAxis: { type: 'value', name: '金额 (元)' },
       series: [
-        { name: '收入', type: 'bar', data: monthly.map(m => m.income || 0), itemStyle: { color: '#16a34a' } },
+        { name: '收入', type: 'bar', data: monthly.map(m => m.income || 0), itemStyle: { color: '#1b9e8f' } },
         { name: '支出', type: 'bar', data: monthly.map(m => m.expense || 0), itemStyle: { color: '#ef4444' } },
       ],
     })
@@ -1308,9 +1367,11 @@ onMounted(() => {
   loadClubList()
   loadClubCancelList()
   loadManagedClubs()
+  loadPendingCounts()
   loadEventApprovals()
   loadEventSummaries()
   loadEventManageList()
+  loadClubListForSelect()
 })
 
 // -- Statistics menu --
@@ -1365,7 +1426,7 @@ const renderClubCharts = () => {
   if (clubStatusChartRef.value) {
     if (!clubStatusChart) clubStatusChart = echarts.init(clubStatusChartRef.value)
     const items = d.statusDistribution || []
-    clubStatusChart.setOption({ tooltip: { trigger: 'axis' }, xAxis: { type: 'category', data: items.map(i => i.statusName) }, yAxis: { type: 'value' }, series: [{ type: 'bar', data: items.map(i => i.count), itemStyle: { color: '#6366f1' } }] })
+    clubStatusChart.setOption({ tooltip: { trigger: 'axis' }, xAxis: { type: 'category', data: items.map(i => i.statusName) }, yAxis: { type: 'value' }, series: [{ type: 'bar', data: items.map(i => i.count), itemStyle: { color: '#5b6abf' } }] })
   }
   if (clubMemberSizeChartRef.value) {
     if (!clubMemberSizeChart) clubMemberSizeChart = echarts.init(clubMemberSizeChartRef.value)
@@ -1378,7 +1439,7 @@ const renderEventCharts = () => {
   if (eventMonthlyChartRef.value) {
     if (!eventMonthlyChart) eventMonthlyChart = echarts.init(eventMonthlyChartRef.value)
     const m = d.monthlyEventStats || []
-    eventMonthlyChart.setOption({ tooltip: { trigger: 'axis' }, legend: { data: ['活动数', '参与人次'] }, xAxis: { type: 'category', data: m.map(i => i.month + '月') }, yAxis: [{ type: 'value', name: '活动数' }, { type: 'value', name: '参与人次' }], series: [{ name: '活动数', type: 'bar', data: m.map(i => i.eventCount), itemStyle: { color: '#6366f1' } }, { name: '参与人次', type: 'line', yAxisIndex: 1, data: m.map(i => i.signupCount), itemStyle: { color: '#f59e0b' } }] })
+    eventMonthlyChart.setOption({ tooltip: { trigger: 'axis' }, legend: { data: ['活动数', '参与人次'] }, xAxis: { type: 'category', data: m.map(i => i.month + '月') }, yAxis: [{ type: 'value', name: '活动数' }, { type: 'value', name: '参与人次' }], series: [{ name: '活动数', type: 'bar', data: m.map(i => i.eventCount), itemStyle: { color: '#5b6abf' } }, { name: '参与人次', type: 'line', yAxisIndex: 1, data: m.map(i => i.signupCount), itemStyle: { color: '#d4a020' } }] })
   }
   if (eventStatusChartRef.value) {
     if (!eventStatusChart) eventStatusChart = echarts.init(eventStatusChartRef.value)
@@ -1391,7 +1452,7 @@ const renderFinanceStatsCharts = () => {
   if (financeMonthlyChartRef.value) {
     if (!financeMonthlyStatsChart) financeMonthlyStatsChart = echarts.init(financeMonthlyChartRef.value)
     const m = d.monthlyFinanceStats || []
-    financeMonthlyStatsChart.setOption({ tooltip: { trigger: 'axis' }, legend: { data: ['收入', '支出'] }, xAxis: { type: 'category', data: m.map(i => i.month + '月') }, yAxis: { type: 'value', name: '金额 (元)' }, series: [{ name: '收入', type: 'bar', data: m.map(i => i.income || 0), itemStyle: { color: '#16a34a' } }, { name: '支出', type: 'bar', data: m.map(i => i.expense || 0), itemStyle: { color: '#ef4444' } }] })
+    financeMonthlyStatsChart.setOption({ tooltip: { trigger: 'axis' }, legend: { data: ['收入', '支出'] }, xAxis: { type: 'category', data: m.map(i => i.month + '月') }, yAxis: { type: 'value', name: '金额 (元)' }, series: [{ name: '收入', type: 'bar', data: m.map(i => i.income || 0), itemStyle: { color: '#1b9e8f' } }, { name: '支出', type: 'bar', data: m.map(i => i.expense || 0), itemStyle: { color: '#ef4444' } }] })
   }
   if (financeIncomeTypeChartRef.value) {
     if (!financeIncomeTypeChart) financeIncomeTypeChart = echarts.init(financeIncomeTypeChartRef.value)
@@ -1439,6 +1500,142 @@ onBeforeUnmount(() => {
   if (financeMonthlyStatsChart) { financeMonthlyStatsChart.dispose(); financeMonthlyStatsChart = null }
   if (financeIncomeTypeChart) { financeIncomeTypeChart.dispose(); financeIncomeTypeChart = null }
 })
+
+// ===== Club Review Management (年审管理) =====
+const reviewWindowOpen = ref(false)
+const reviewWindowYear = ref(new Date().getFullYear())
+const reviewList = ref([])
+const reviewListTotal = ref(0)
+const reviewListPage = ref(1)
+const reviewListStatus = ref(null)
+const reviewListKeyword = ref('')
+const reviewDetail = ref(null)
+const reviewDetailVisible = ref(false)
+const reviewDecisionForm = reactive({ action: '', score: null, rejectReason: '' })
+
+const loadReviewWindow = async () => {
+  try {
+    const res = await getReviewWindowStatusApi()
+    const data = getBizData(res)
+    reviewWindowOpen.value = data?.open === 'true'
+    reviewWindowYear.value = data?.year ? parseInt(data.year) : new Date().getFullYear()
+  } catch (e) { /* ignore */ }
+}
+
+const toggleReviewWindow = async (open) => {
+  try {
+    if (open) {
+      await updateReviewWindowApi({ action: 'open', year: reviewWindowYear.value })
+      reviewWindowOpen.value = true
+      feedback.value = `已开启 ${reviewWindowYear.value} 年度年审窗口`
+    } else {
+      await updateReviewWindowApi({ action: 'close' })
+      reviewWindowOpen.value = false
+      feedback.value = '已关闭年审窗口'
+    }
+    await loadReviewList()
+  } catch (e) {
+    feedback.value = e?.response?.data?.message || '操作失败'
+  }
+}
+
+const loadReviewList = async () => {
+  try {
+    const params = { pageNum: reviewListPage.value, pageSize: 20 }
+    if (reviewListStatus.value) params.reviewStatus = reviewListStatus.value
+    if (reviewListKeyword.value.trim()) params.keyword = reviewListKeyword.value.trim()
+    const res = await getReviewsForApprovalApi(params)
+    const data = getBizData(res)
+    reviewList.value = Array.isArray(data?.records) ? data.records : []
+    reviewListTotal.value = data?.total || 0
+  } catch (e) { /* ignore */ }
+}
+
+const openReviewDetail = async (reviewId) => {
+  try {
+    const res = await getReviewDetailApi(reviewId)
+    reviewDetail.value = getBizData(res)
+    reviewDetailVisible.value = true
+    reviewDecisionForm.action = ''
+    reviewDecisionForm.score = null
+    reviewDecisionForm.rejectReason = ''
+  } catch (e) {
+    feedback.value = e?.response?.data?.message || '加载失败'
+  }
+}
+
+const submitReviewDecision = async () => {
+  if (!reviewDecisionForm.action) { feedback.value = '请选择操作'; return }
+  if (reviewDecisionForm.action === 'REJECT' && !reviewDecisionForm.rejectReason.trim()) {
+    feedback.value = '请填写驳回原因'; return
+  }
+  try {
+    await decideReviewApi(reviewDetail.value.id, {
+      action: reviewDecisionForm.action,
+      score: reviewDecisionForm.score,
+      rejectReason: reviewDecisionForm.rejectReason || null,
+    })
+    feedback.value = reviewDecisionForm.action === 'APPROVE' ? '已通过' : '已驳回'
+    reviewDetailVisible.value = false
+    await loadReviewList()
+    loadPendingCounts()
+  } catch (e) {
+    feedback.value = e?.response?.data?.message || '操作失败'
+  }
+}
+
+const reviewStatusText = (s) => {
+  const m = { 1: '待提交', 2: '待审核', 3: '已通过', 4: '已驳回', 5: '整改中' }
+  return m[s] || '未知'
+}
+
+// ===== 红点提醒 =====
+const pendingCounts = reactive({
+  clubApproval: 0,
+  clubCancel: 0,
+  eventApproval: 0,
+  expenseApproval: 0,
+  review: 0,
+})
+const hasApprovalPending = computed(() => pendingCounts.clubApproval + pendingCounts.clubCancel + pendingCounts.eventApproval > 0)
+const hasFinancePending = computed(() => pendingCounts.expenseApproval > 0)
+const hasReviewPending = computed(() => pendingCounts.review > 0)
+
+const loadPendingCounts = async () => {
+  try {
+    const [clubRes, cancelRes, eventRes, expenseRes, reviewRes] = await Promise.all([
+      getClubApprovalQueueApi({ pageNum: 1, pageSize: 1 }),
+      getClubCancelApprovalQueueApi({ pageNum: 1, pageSize: 1 }),
+      getEventApprovalQueueApi({ pageNum: 1, pageSize: 1, eventStatus: 2 }),
+      getExpenseApprovalQueueApi({ pageNum: 1, pageSize: 1 }),
+      getReviewsForApprovalApi({ pageNum: 1, pageSize: 1, reviewStatus: 2 }),
+    ])
+    pendingCounts.clubApproval = getBizData(clubRes)?.total || 0
+    pendingCounts.clubCancel = getBizData(cancelRes)?.total || 0
+    pendingCounts.eventApproval = getBizData(eventRes)?.total || 0
+    pendingCounts.expenseApproval = getBizData(expenseRes)?.total || 0
+    pendingCounts.review = getBizData(reviewRes)?.total || 0
+  } catch (e) { /* ignore */ }
+}
+
+// ===== 文件在线预览 =====
+const previewDialog = reactive({ visible: false, url: '', type: '' })
+const openPreview = (url) => {
+  if (!url) return
+  const ext = url.split('.').pop().split('?')[0].toLowerCase()
+  if (['jpg','jpeg','png','gif','bmp','webp'].includes(ext)) {
+    previewDialog.type = 'image'
+  } else if (ext === 'pdf') {
+    previewDialog.type = 'pdf'
+  } else if (['doc','docx'].includes(ext)) {
+    previewDialog.type = 'office'
+  } else {
+    window.open(url, '_blank')
+    return
+  }
+  previewDialog.url = url
+  previewDialog.visible = true
+}
 </script>
 
 <template>
@@ -1471,6 +1668,7 @@ onBeforeUnmount(() => {
             @click="toggleApprovalMenu"
           >
             <span>审批管理</span>
+            <span v-if="hasApprovalPending && !approvalMenuExpanded" class="red-dot"></span>
             <span class="menu-arrow">{{ approvalMenuExpanded ? '▾' : '▸' }}</span>
           </button>
           <div v-show="approvalMenuExpanded" class="submenu">
@@ -1479,19 +1677,19 @@ onBeforeUnmount(() => {
               class="submenu-item"
               :class="{ active: activeMenu === 'clubs' }"
               @click="openApprovalMenu('clubs')"
-            >社团申报审批</button>
+            >社团申报审批<span v-if="pendingCounts.clubApproval > 0" class="red-dot"></span></button>
             <button
               type="button"
               class="submenu-item"
               :class="{ active: activeMenu === 'club-cancel-approvals' }"
               @click="openApprovalMenu('club-cancel-approvals')"
-            >社团注销审核</button>
+            >社团注销审核<span v-if="pendingCounts.clubCancel > 0" class="red-dot"></span></button>
             <button
               type="button"
               class="submenu-item"
               :class="{ active: activeMenu === 'event-approvals' }"
               @click="openApprovalMenu('event-approvals')"
-            >活动审批</button>
+            >活动审批<span v-if="pendingCounts.eventApproval > 0" class="red-dot"></span></button>
           </div>
         </div>
 
@@ -1503,6 +1701,7 @@ onBeforeUnmount(() => {
             @click="toggleFinanceMenu"
           >
             <span>经费管理</span>
+            <span v-if="hasFinancePending && !financeMenuExpanded" class="red-dot"></span>
             <span class="menu-arrow">{{ financeMenuExpanded ? '▾' : '▸' }}</span>
           </button>
           <div v-show="financeMenuExpanded" class="submenu">
@@ -1511,7 +1710,7 @@ onBeforeUnmount(() => {
               class="submenu-item"
               :class="{ active: activeMenu === 'expense-approval' }"
               @click="openFinanceMenu('expense-approval')"
-            >经费审批</button>
+            >经费审批<span v-if="pendingCounts.expenseApproval > 0" class="red-dot"></span></button>
             <button
               type="button"
               class="submenu-item"
@@ -1547,6 +1746,10 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <button type="button" class="menu-item" :class="{ active: activeMenu === 'review-mgmt' }" @click="activeMenu = 'review-mgmt'; loadReviewWindow(); loadReviewList()" style="position:relative">
+          年审管理<span v-if="hasReviewPending" class="red-dot"></span>
+        </button>
+
         <button type="button" class="menu-item" :class="{ active: activeMenu === 'tasks' }" @click="activeMenu = 'tasks'">
           自动化任务
         </button>
@@ -1569,6 +1772,18 @@ onBeforeUnmount(() => {
         <section v-show="activeMenu === 'stats'" class="panel">
           <h3>数据总览</h3>
           <ul class="stats-grid">
+            <li>
+              <span>活跃社团</span>
+              <strong>{{ stats.activeClubCount }}</strong>
+            </li>
+            <li>
+              <span>本月活动</span>
+              <strong>{{ stats.monthEventCount }}</strong>
+            </li>
+            <li>
+              <span>在册成员</span>
+              <strong>{{ stats.registeredMemberCount }}</strong>
+            </li>
             <li>
               <span>社团（正常/全部）</span>
               <strong>{{ stats.activeClubCount }}/{{ stats.totalClubCount }}</strong>
@@ -1612,7 +1827,7 @@ onBeforeUnmount(() => {
                 <option value="5">驳回</option>
               </select>
             </label>
-            <button type="button" class="btn" :disabled="clubLoading" @click="loadClubList">查询</button>
+            <button type="button" class="btn" :disabled="clubLoading" @click="clubApprovalPagination.pageNum = 1; loadClubList()">查询</button>
           </div>
 
           <div class="user-table-wrap">
@@ -1641,7 +1856,7 @@ onBeforeUnmount(() => {
               </div>
               <div>{{ club.initiatorRealName || club.applicantRealName || club.realName || '-' }}</div>
               <div class="action-row">
-                <button type="button" class="btn ghost" @click="openClubApplyDetail(club)">社团详情</button>
+                <button type="button" class="btn ghost" @click="openClubApplyDetail(club)">详情</button>
                 <button
                   type="button"
                   :class="['btn', 'success', { 'btn-disabled': !canMoveToNextStep(club.applyStatus) }]"
@@ -1661,6 +1876,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-if="clubs.length === 0" class="empty-text">暂无社团审批数据</div>
+            <div v-if="clubApprovalPagination.total > clubApprovalPagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="clubApprovalPagination.pageNum <= 1" @click="clubApprovalPagination.pageNum--; loadClubList()">上一页</button>
+              <span class="pagination-info">第 {{ clubApprovalPagination.pageNum }} 页 / 共 {{ Math.ceil(clubApprovalPagination.total / clubApprovalPagination.pageSize) }} 页（共 {{ clubApprovalPagination.total }} 条）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="clubApprovalPagination.pageNum >= Math.ceil(clubApprovalPagination.total / clubApprovalPagination.pageSize)" @click="clubApprovalPagination.pageNum++; loadClubList()">下一页</button>
+            </div>
           </div>
 
           <div v-if="detailVisible" class="detail-mask" @click.self="closeClubApplyDetail">
@@ -1705,26 +1925,22 @@ onBeforeUnmount(() => {
                   <strong>{{ clubApplyDetail?.remark || '-' }}</strong>
                 </div>
                 <div class="full action-row">
-                  <a
+                  <button
+                    type="button"
                     class="btn"
-                    :class="{ disabled: !(clubApplyDetail?.charterUrl || clubApplyDetail?.charterFileUrl) }"
-                    :href="clubApplyDetail?.charterUrl || clubApplyDetail?.charterFileUrl || undefined"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download
+                    :disabled="!(clubApplyDetail?.charterUrl || clubApplyDetail?.charterFileUrl)"
+                    @click="openPreview(clubApplyDetail?.charterUrl || clubApplyDetail?.charterFileUrl)"
                   >
-                    下载章程文件
-                  </a>
-                  <a
+                    预览章程文件
+                  </button>
+                  <button
+                    type="button"
                     class="btn"
-                    :class="{ disabled: !(clubApplyDetail?.instructorProofUrl || clubApplyDetail?.instructorProofFileUrl) }"
-                    :href="clubApplyDetail?.instructorProofUrl || clubApplyDetail?.instructorProofFileUrl || undefined"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download
+                    :disabled="!(clubApplyDetail?.instructorProofUrl || clubApplyDetail?.instructorProofFileUrl)"
+                    @click="openPreview(clubApplyDetail?.instructorProofUrl || clubApplyDetail?.instructorProofFileUrl)"
                   >
-                    下载指导教师证明
-                  </a>
+                    预览指导教师证明
+                  </button>
                 </div>
               </div>
             </section>
@@ -1799,6 +2015,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-if="cancelClubs.length === 0" class="empty-text">暂无社团注销审核数据</div>
+            <div v-if="clubCancelPagination.total > clubCancelPagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="clubCancelPagination.pageNum <= 1" @click="clubCancelPagination.pageNum--; loadClubCancelList()">上一页</button>
+              <span class="pagination-info">第 {{ clubCancelPagination.pageNum }} 页 / 共 {{ Math.ceil(clubCancelPagination.total / clubCancelPagination.pageSize) }} 页（共 {{ clubCancelPagination.total }} 条）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="clubCancelPagination.pageNum >= Math.ceil(clubCancelPagination.total / clubCancelPagination.pageSize)" @click="clubCancelPagination.pageNum++; loadClubCancelList()">下一页</button>
+            </div>
           </div>
 
           <div v-if="cancelDetailVisible" class="detail-mask" @click.self="closeClubCancelDetail">
@@ -1835,16 +2056,9 @@ onBeforeUnmount(() => {
                   <strong>{{ cancelApplyDetail?.applyReason || '-' }}</strong>
                 </div>
                 <div class="full action-row">
-                  <a
-                    class="btn"
-                    :class="{ disabled: !(cancelApplyDetail?.assetSettlementUrl || cancelApplyDetail?.assetSettlementFileUrl) }"
-                    :href="cancelApplyDetail?.assetSettlementUrl || cancelApplyDetail?.assetSettlementFileUrl || undefined"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download
-                  >
-                    下载资产清算报告
-                  </a>
+                  <button type="button" class="btn" :disabled="!(cancelApplyDetail?.assetSettlementUrl || cancelApplyDetail?.assetSettlementFileUrl)" @click="openPreview(cancelApplyDetail?.assetSettlementUrl || cancelApplyDetail?.assetSettlementFileUrl)">
+                    预览资产清算报告
+                  </button>
                 </div>
               </div>
             </section>
@@ -1869,7 +2083,7 @@ onBeforeUnmount(() => {
                 <option v-for="category in manageCategoryOptions" :key="category" :value="category">{{ category }}</option>
               </select>
             </label>
-            <button type="button" class="btn" :disabled="manageLoading" @click="loadManagedClubs">查询</button>
+            <button type="button" class="btn" :disabled="manageLoading" @click="managedClubPagination.pageNum = 1; loadManagedClubs()">查询</button>
           </div>
 
           <div class="user-table-wrap">
@@ -1932,6 +2146,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-if="managedClubs.length === 0" class="empty-text">暂无社团管理数据</div>
+            <div v-if="managedClubPagination.total > managedClubPagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="managedClubPagination.pageNum <= 1" @click="managedClubPagination.pageNum--; loadManagedClubs()">上一页</button>
+              <span class="pagination-info">第 {{ managedClubPagination.pageNum }} 页 / 共 {{ Math.ceil(managedClubPagination.total / managedClubPagination.pageSize) }} 页（共 {{ managedClubPagination.total }} 条）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="managedClubPagination.pageNum >= Math.ceil(managedClubPagination.total / managedClubPagination.pageSize)" @click="managedClubPagination.pageNum++; loadManagedClubs()">下一页</button>
+            </div>
           </div>
 
           <div v-if="manageDetailVisible" class="detail-mask" @click.self="closeManageDetail">
@@ -1972,26 +2191,8 @@ onBeforeUnmount(() => {
                   <strong>{{ manageDetail?.purpose || '-' }}</strong>
                 </div>
                 <div class="full action-row">
-                  <a
-                    class="btn"
-                    :class="{ disabled: !manageDetail?.charterUrl }"
-                    :href="manageDetail?.charterUrl || undefined"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download
-                  >
-                    下载章程文件
-                  </a>
-                  <a
-                    class="btn"
-                    :class="{ disabled: !manageDetail?.instructorProofUrl }"
-                    :href="manageDetail?.instructorProofUrl || undefined"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    download
-                  >
-                    下载指导教师证明
-                  </a>
+                  <button type="button" class="btn" :disabled="!manageDetail?.charterUrl" @click="openPreview(manageDetail?.charterUrl)">预览章程文件</button>
+                  <button type="button" class="btn" :disabled="!manageDetail?.instructorProofUrl" @click="openPreview(manageDetail?.instructorProofUrl)">预览指导教师证明</button>
                 </div>
               </div>
             </section>
@@ -2043,7 +2244,7 @@ onBeforeUnmount(() => {
           <div class="club-filter-row">
             <label>
               关键词
-              <input v-model="userFilters.keyword" type="text" placeholder="输入姓名或账号关键词" />
+              <input v-model="userFilters.keyword" type="text" placeholder="输入姓名或账号关键词" @keyup.enter="userPagination.pageNum = 1; loadUsers()" />
             </label>
             <label>
               角色
@@ -2059,7 +2260,13 @@ onBeforeUnmount(() => {
                 <option v-for="item in userStatusOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
               </select>
             </label>
-            <button type="button" class="btn" :disabled="loading" @click="loadData">查询</button>
+            <label>
+              所属社团
+              <select v-model="userFilters.clubId">
+                <option value="">全部社团</option>
+                <option v-for="c in clubListForSelect" :key="c.clubId || c.id" :value="c.clubId || c.id">{{ c.clubName }}</option>
+              </select>
+            </label>
           </div>
           <div class="user-toolbar">
             <label class="check-item">
@@ -2096,7 +2303,7 @@ onBeforeUnmount(() => {
 
             <div v-for="user in users" :key="user.id" class="user-row">
               <div class="col-check">
-                <input v-model="selectedUserIds" type="checkbox" :value="user.id" />
+                <input v-if="user.id !== authStore.user?.userId" v-model="selectedUserIds" type="checkbox" :value="user.id" />
               </div>
               <div class="col-name">
                 <strong>{{ user.realName || '-' }}</strong>
@@ -2106,7 +2313,7 @@ onBeforeUnmount(() => {
                 <span :class="['role-tag', getUserRoleTagClass(user.roleText)]">{{ user.roleText || '-' }}</span>
               </div>
               <div class="col-status">{{ getUserStatusText(user.status) }}</div>
-              <div class="col-action action-row">
+              <div class="col-action action-row" v-if="user.id !== authStore.user?.userId">
                 <button
                   type="button"
                   class="btn"
@@ -2124,6 +2331,11 @@ onBeforeUnmount(() => {
                   {{ isUserFrozen(user) ? '取消禁用账号' : '禁用账号' }}
                 </button>
               </div>
+            </div>
+            <div v-if="userPagination.total > userPagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="userPagination.pageNum <= 1" @click="userPagination.pageNum--; loadUsers()">上一页</button>
+              <span class="pagination-info">第 {{ userPagination.pageNum }} 页 / 共 {{ Math.ceil(userPagination.total / userPagination.pageSize) }} 页（共 {{ userPagination.total }} 人）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="userPagination.pageNum >= Math.ceil(userPagination.total / userPagination.pageSize)" @click="userPagination.pageNum++; loadUsers()">下一页</button>
             </div>
           </div>
         </section>
@@ -2238,6 +2450,94 @@ onBeforeUnmount(() => {
           <div v-else class="empty-text">请选择年份后点击查询</div>
         </section>
 
+        <!-- 年审管理 -->
+        <section v-show="activeMenu === 'review-mgmt'" class="panel">
+          <h3>年审管理</h3>
+
+          <!-- 年审开关 -->
+          <div class="action-row" style="margin-bottom:16px;align-items:center;gap:12px">
+            <label>年审年份：
+              <input v-model.number="reviewWindowYear" type="number" min="2020" max="2099" style="width:80px;padding:4px 8px;border:1px solid #e8ddd6;border-radius:4px" />
+            </label>
+            <button v-if="!reviewWindowOpen" type="button" class="btn" @click="toggleReviewWindow(true)">开启年审窗口</button>
+            <button v-else type="button" class="btn ghost" @click="toggleReviewWindow(false)">关闭年审窗口</button>
+            <span :style="{ color: reviewWindowOpen ? '#1b9e8f' : '#7a6b62' }">
+              {{ reviewWindowOpen ? '年审窗口已开启' : '年审窗口已关闭' }}
+            </span>
+          </div>
+
+          <!-- 筛选 -->
+          <div class="club-filter-row" style="margin-bottom:12px">
+            <label>状态：
+              <select v-model="reviewListStatus" @change="reviewListPage = 1; loadReviewList()">
+                <option :value="null">全部</option>
+                <option :value="1">待提交</option>
+                <option :value="2">待审核</option>
+                <option :value="3">已通过</option>
+                <option :value="4">已驳回</option>
+              </select>
+            </label>
+            <label>搜索：
+              <input v-model="reviewListKeyword" type="text" placeholder="社团名称" @keyup.enter="reviewListPage = 1; loadReviewList()" />
+            </label>
+            <button type="button" class="btn btn-sm" @click="reviewListPage = 1; loadReviewList()">查询</button>
+          </div>
+
+          <!-- 列表 -->
+          <div v-if="reviewList.length">
+            <div class="user-row user-head">
+              <div>社团</div><div>年份</div><div>状态</div><div>评分</div><div>操作</div>
+            </div>
+            <div v-for="r in reviewList" :key="r.id" class="user-row">
+              <div>{{ r.clubName }}</div>
+              <div>{{ r.reviewYear }}</div>
+              <div><span :class="['status-badge', r.reviewStatus === 3 ? 'approved' : r.reviewStatus === 4 ? 'rejected' : 'pending']">{{ reviewStatusText(r.reviewStatus) }}</span></div>
+              <div>{{ r.score ?? '-' }}</div>
+              <div><button type="button" class="btn btn-sm" @click="openReviewDetail(r.id)">查看</button></div>
+            </div>
+          </div>
+          <p v-else class="empty-text">暂无年审记录</p>
+        </section>
+
+        <!-- 年审详情弹窗 -->
+        <div v-if="reviewDetailVisible && reviewDetail" class="modal-mask" @click.self="reviewDetailVisible = false">
+          <div class="modal-box">
+            <div class="modal-head">
+              <h3>{{ reviewDetail.clubName }} - {{ reviewDetail.reviewYear }}年度年审</h3>
+              <button type="button" class="modal-close" @click="reviewDetailVisible = false">×</button>
+            </div>
+            <div class="modal-body" style="max-height:70vh;overflow-y:auto">
+              <div class="detail-row"><span class="detail-label">审核状态</span><span :class="['status-badge', reviewDetail.reviewStatus===3?'approved':reviewDetail.reviewStatus===4?'rejected':'pending']">{{ reviewStatusText(reviewDetail.reviewStatus) }}</span></div>
+              <div v-if="reviewDetail.score" class="detail-row"><span class="detail-label">评分</span><span>{{ reviewDetail.score }}</span></div>
+              <div class="detail-row"><span class="detail-label">年度总收入</span><span style="color:#1b9e8f;font-weight:600">{{ Number(reviewDetail.totalIncome||0).toFixed(2) }} 元</span></div>
+              <div class="detail-row"><span class="detail-label">年度总支出</span><span style="color:#dc2626;font-weight:600">{{ Number(reviewDetail.totalExpense||0).toFixed(2) }} 元</span></div>
+              <div class="detail-row"><span class="detail-label">当前余额</span><span style="font-weight:600">{{ Number(reviewDetail.balance||0).toFixed(2) }} 元</span></div>
+              <div class="detail-row"><span class="detail-label">在籍成员</span><span>{{ reviewDetail.memberCount||0 }} 人</span></div>
+              <div class="detail-row"><span class="detail-label">年度活动</span><span>{{ reviewDetail.eventCount||0 }} 次</span></div>
+
+              <div v-if="reviewDetail.summaryText" class="detail-row detail-row--block">
+                <span class="detail-label">年度工作总结</span>
+                <p class="detail-text">{{ reviewDetail.summaryText }}</p>
+              </div>
+              <div v-if="reviewDetail.attachmentUrl" class="detail-row">
+                <span class="detail-label">补充材料</span>
+                <a style="cursor:pointer;color:#5b6abf;text-decoration:underline" @click="openPreview(reviewDetail.attachmentUrl)">在线预览</a>
+              </div>
+
+              <!-- 审核操作（仅待审核时显示） -->
+              <div v-if="reviewDetail.reviewStatus === 2" style="margin-top:16px;border-top:1px solid #e8ddd6;padding-top:16px">
+                <h4 style="margin:0 0 10px">审核操作</h4>
+                <div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+                  <label>评分：<input v-model.number="reviewDecisionForm.score" type="number" min="0" max="100" step="0.5" style="width:70px;padding:4px 8px;border:1px solid #e8ddd6;border-radius:4px" /></label>
+                  <label>驳回原因：<input v-model="reviewDecisionForm.rejectReason" type="text" style="width:200px;padding:4px 8px;border:1px solid #e8ddd6;border-radius:4px" placeholder="驳回时必填" /></label>
+                  <button type="button" class="btn" @click="reviewDecisionForm.action='APPROVE';submitReviewDecision()">通过</button>
+                  <button type="button" class="btn ghost" style="color:#dc2626;border-color:#dc2626" @click="reviewDecisionForm.action='REJECT';submitReviewDecision()">驳回（限期整改）</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <section v-show="activeMenu === 'tasks'" class="panel">
           <h3>自动化状态任务</h3>
           <div class="action-row">
@@ -2275,15 +2575,15 @@ onBeforeUnmount(() => {
               type="text"
               placeholder="搜索活动标题或社团名称..."
               class="search-input"
-              @keyup.enter="loadEventApprovals"
+              @keyup.enter="eventApprovalPagination.pageNum = 1; loadEventApprovals()"
             />
-            <select v-model="eventApprovalSearch.eventStatus" class="filter-select" @change="loadEventApprovals">
+            <select v-model="eventApprovalSearch.eventStatus" class="filter-select" @change="eventApprovalPagination.pageNum = 1; loadEventApprovals()">
               <option :value="null">全部状态</option>
               <option :value="2">待审批</option>
               <option :value="3">已通过</option>
               <option :value="5">已驳回</option>
             </select>
-            <button type="button" class="btn" @click="loadEventApprovals">搜索</button>
+            <button type="button" class="btn" @click="eventApprovalPagination.pageNum = 1; loadEventApprovals()">搜索</button>
           </div>
           <div class="user-table-wrap">
             <div class="user-row user-head event-row">
@@ -2316,6 +2616,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-if="eventApprovalList.length === 0" class="empty-text">暂无活动记录</div>
+            <div v-if="eventApprovalPagination.total > eventApprovalPagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="eventApprovalPagination.pageNum <= 1" @click="eventApprovalPagination.pageNum--; loadEventApprovals()">上一页</button>
+              <span class="pagination-info">第 {{ eventApprovalPagination.pageNum }} 页 / 共 {{ Math.ceil(eventApprovalPagination.total / eventApprovalPagination.pageSize) }} 页（共 {{ eventApprovalPagination.total }} 条）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="eventApprovalPagination.pageNum >= Math.ceil(eventApprovalPagination.total / eventApprovalPagination.pageSize)" @click="eventApprovalPagination.pageNum++; loadEventApprovals()">下一页</button>
+            </div>
           </div>
         </section>
 
@@ -2332,9 +2637,9 @@ onBeforeUnmount(() => {
               type="text"
               placeholder="搜索活动标题或社团名称..."
               class="search-input"
-              @keyup.enter="loadEventManageList"
+              @keyup.enter="eventManagePagination.pageNum = 1; loadEventManageList()"
             />
-            <select v-model="eventManageSearch.eventStatus" class="filter-select" @change="loadEventManageList">
+            <select v-model="eventManageSearch.eventStatus" class="filter-select" @change="eventManagePagination.pageNum = 1; loadEventManageList()">
               <option :value="null">全部状态</option>
               <option :value="2">待审核</option>
               <option :value="3">报名中</option>
@@ -2342,7 +2647,7 @@ onBeforeUnmount(() => {
               <option :value="4">已结束</option>
               <option :value="5">已驳回</option>
             </select>
-            <button type="button" class="btn" @click="loadEventManageList">搜索</button>
+            <button type="button" class="btn" @click="eventManagePagination.pageNum = 1; loadEventManageList()">搜索</button>
           </div>
           <div class="user-table-wrap">
             <div class="user-row user-head event-manage-row">
@@ -2373,6 +2678,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div v-if="eventManageList.length === 0" class="empty-text">暂无活动数据</div>
+            <div v-if="eventManagePagination.total > eventManagePagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="eventManagePagination.pageNum <= 1" @click="eventManagePagination.pageNum--; loadEventManageList()">上一页</button>
+              <span class="pagination-info">第 {{ eventManagePagination.pageNum }} 页 / 共 {{ Math.ceil(eventManagePagination.total / eventManagePagination.pageSize) }} 页（共 {{ eventManagePagination.total }} 条）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="eventManagePagination.pageNum >= Math.ceil(eventManagePagination.total / eventManagePagination.pageSize)" @click="eventManagePagination.pageNum++; loadEventManageList()">下一页</button>
+            </div>
           </div>
         </section>
 
@@ -2399,6 +2709,11 @@ onBeforeUnmount(() => {
               <div><button type="button" class="btn ghost sm" @click="openEventSummaryView(s)">查看</button></div>
             </div>
             <div v-if="eventSummaryList.length === 0" class="empty-text">暂无活动总结</div>
+            <div v-if="eventSummaryPagination.total > eventSummaryPagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="eventSummaryPagination.pageNum <= 1" @click="eventSummaryPagination.pageNum--; loadEventSummaries()">上一页</button>
+              <span class="pagination-info">第 {{ eventSummaryPagination.pageNum }} 页 / 共 {{ Math.ceil(eventSummaryPagination.total / eventSummaryPagination.pageSize) }} 页（共 {{ eventSummaryPagination.total }} 条）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="eventSummaryPagination.pageNum >= Math.ceil(eventSummaryPagination.total / eventSummaryPagination.pageSize)" @click="eventSummaryPagination.pageNum++; loadEventSummaries()">下一页</button>
+            </div>
           </div>
         </section>
 
@@ -2482,7 +2797,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div v-if="selectedExpenseDetail?.invoiceUrl" class="full">
                   <span>发票附件</span>
-                  <a :href="selectedExpenseDetail.invoiceUrl" target="_blank" rel="noopener noreferrer" class="link-text">查看发票</a>
+                  <a class="link-text" style="cursor:pointer" @click="openPreview(selectedExpenseDetail.invoiceUrl)">预览发票</a>
                 </div>
                 <div class="full action-row">
                   <template v-if="selectedExpenseDetail?.expenseStatus === 1">
@@ -2503,7 +2818,7 @@ onBeforeUnmount(() => {
                 <button type="button" class="icon-close-btn" aria-label="关闭" @click="rejectDialogVisible = false">×</button>
               </div>
               <div style="padding:16px 20px">
-                <p style="margin-bottom:10px;color:#64748b;font-size:13px">
+                <p style="margin-bottom:10px;color:#7a6b62;font-size:13px">
                   请输入驳回原因（必填），将通知社团管理员。
                 </p>
                 <textarea
@@ -2537,7 +2852,7 @@ onBeforeUnmount(() => {
               {{ anomalyExpenseLoading ? '加载中...' : '刷新' }}
             </button>
           </div>
-          <p class="hint-text" style="margin-bottom:12px;color:#64748b;font-size:13px">
+          <p class="hint-text" style="margin-bottom:12px;color:#7a6b62;font-size:13px">
             异常判定规则：金额超过500元但未经学校审批，或缺少发票凭证。
           </p>
           <div class="search-bar">
@@ -2577,7 +2892,7 @@ onBeforeUnmount(() => {
                 </span>
               </div>
               <div>
-                <a v-if="item.invoiceUrl" :href="item.invoiceUrl" target="_blank" rel="noopener noreferrer" class="link-text">查看</a>
+                <a v-if="item.invoiceUrl" class="link-text" style="cursor:pointer" @click="openPreview(item.invoiceUrl)">预览</a>
                 <span v-else style="color:#dc2626">缺失</span>
               </div>
               <div>{{ item.createdAt?.slice(0,16)?.replace('T',' ') || '-' }}</div>
@@ -2641,7 +2956,7 @@ onBeforeUnmount(() => {
                   {{ item.bizTypeName || (item.bizType === 1 ? '收入' : '支出') }}
                 </span>
               </div>
-              <div :style="{ color: Number(item.changeAmount) >= 0 ? '#059669' : '#dc2626', fontWeight: 600 }">
+              <div :style="{ color: Number(item.changeAmount) >= 0 ? '#1b9e8f' : '#dc2626', fontWeight: 600 }">
                 {{ Number(item.changeAmount) >= 0 ? '+' : '' }}{{ Number(item.changeAmount || 0).toFixed(2) }} 元
               </div>
               <div style="font-weight:500">{{ Number(item.balanceAfter || 0).toFixed(2) }} 元</div>
@@ -2753,7 +3068,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="eventApprovalDetailDialog.event?.safetyPlanUrl" class="full">
           <span>安全预案</span>
-          <a :href="eventApprovalDetailDialog.event.safetyPlanUrl" target="_blank">下载查看</a>
+          <a style="cursor:pointer;color:#5b6abf" @click="openPreview(eventApprovalDetailDialog.event.safetyPlanUrl)">在线预览</a>
         </div>
         <div class="full action-row">
           <template v-if="eventApprovalDetailDialog.event?.eventStatus === 2">
@@ -2791,8 +3106,8 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="eventSummaryViewDialog.summary?.summaryImages && eventSummaryViewDialog.summary.summaryImages.length > 0" class="full">
           <span>活动图片（{{ eventSummaryViewDialog.summary.summaryImages.length }} 张）</span>
-          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;max-height:300px;overflow-y:auto;padding:4px;border:1px solid #e5e7eb;border-radius:4px">
-            <img v-for="(img, idx) in eventSummaryViewDialog.summary.summaryImages" :key="idx" :src="img" style="width:120px;height:120px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid #e5e7eb" @click="window.open(img, '_blank')" alt="活动图片" />
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;max-height:300px;overflow-y:auto;padding:4px;border:1px solid #e8ddd6;border-radius:4px">
+            <img v-for="(img, idx) in eventSummaryViewDialog.summary.summaryImages" :key="idx" :src="img" style="width:120px;height:120px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid #e8ddd6" @click="window.open(img, '_blank')" alt="活动图片" />
           </div>
         </div>
         <div v-if="eventSummaryViewDialog.summary?.issueReflection" class="full">
@@ -2805,7 +3120,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="eventSummaryViewDialog.summary?.attachmentUrl" class="full">
           <span>附件</span>
-          <a :href="eventSummaryViewDialog.summary.attachmentUrl" target="_blank" style="color:#1d4ed8;text-decoration:underline">下载附件</a>
+          <a style="cursor:pointer;color:#5b6abf;text-decoration:underline" @click="openPreview(eventSummaryViewDialog.summary.attachmentUrl)">在线预览</a>
         </div>
         <div class="full action-row">
           <button type="button" class="btn ghost" @click="eventSummaryViewDialog.visible = false">关闭</button>
@@ -2851,7 +3166,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="eventManageDetailDialog.event?.safetyPlanUrl" class="full">
           <span>安全预案</span>
-          <a :href="eventManageDetailDialog.event.safetyPlanUrl" target="_blank">下载查看</a>
+          <a style="cursor:pointer;color:#5b6abf" @click="openPreview(eventManageDetailDialog.event.safetyPlanUrl)">在线预览</a>
         </div>
         <div class="full action-row">
           <button type="button" class="btn ghost" @click="eventManageDetailDialog.visible = false">关闭</button>
@@ -2885,8 +3200,8 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="eventManageSummaryDialog.summary?.summaryImages && eventManageSummaryDialog.summary.summaryImages.length > 0" class="full">
           <span>活动图片（{{ eventManageSummaryDialog.summary.summaryImages.length }} 张）</span>
-          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;max-height:300px;overflow-y:auto;padding:4px;border:1px solid #e5e7eb;border-radius:4px">
-            <img v-for="(img, idx) in eventManageSummaryDialog.summary.summaryImages" :key="idx" :src="img" style="width:120px;height:120px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid #e5e7eb" @click="window.open(img, '_blank')" alt="活动图片" />
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px;max-height:300px;overflow-y:auto;padding:4px;border:1px solid #e8ddd6;border-radius:4px">
+            <img v-for="(img, idx) in eventManageSummaryDialog.summary.summaryImages" :key="idx" :src="img" style="width:120px;height:120px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid #e8ddd6" @click="window.open(img, '_blank')" alt="活动图片" />
           </div>
         </div>
         <div v-if="eventManageSummaryDialog.summary?.issueReflection" class="full">
@@ -2895,7 +3210,7 @@ onBeforeUnmount(() => {
         </div>
         <div v-if="eventManageSummaryDialog.summary?.attachmentUrl" class="full">
           <span>附件</span>
-          <a :href="eventManageSummaryDialog.summary.attachmentUrl" target="_blank" style="color:#1d4ed8;text-decoration:underline">下载附件</a>
+          <a style="cursor:pointer;color:#5b6abf;text-decoration:underline" @click="openPreview(eventManageSummaryDialog.summary.attachmentUrl)">在线预览</a>
         </div>
         <div class="full action-row">
           <button type="button" class="btn ghost" @click="eventManageSummaryDialog.visible = false">关闭</button>
@@ -2903,22 +3218,43 @@ onBeforeUnmount(() => {
       </div>
     </section>
   </div>
+
+  <!-- 文件在线预览弹窗 -->
+  <div v-if="previewDialog.visible" class="modal-mask" @click.self="previewDialog.visible = false">
+    <div class="modal-box" style="width:min(900px,95%);height:85vh;display:flex;flex-direction:column">
+      <div class="modal-head">
+        <h3>文件预览</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <a :href="previewDialog.url" target="_blank" style="font-size:13px;color:#5b6abf;text-decoration:none">下载</a>
+          <button type="button" class="modal-close" @click="previewDialog.visible = false">×</button>
+        </div>
+      </div>
+      <iframe v-if="previewDialog.type === 'pdf'" :src="previewDialog.url" style="width:100%;flex:1;border:none" />
+      <iframe v-else-if="previewDialog.type === 'office'" :src="'https://view.officeapps.live.com/op/embed.aspx?src=' + encodeURIComponent(previewDialog.url)" style="width:100%;flex:1;border:none" />
+      <div v-else-if="previewDialog.type === 'image'" style="flex:1;overflow:auto;display:flex;justify-content:center;align-items:center;padding:16px;background:#f6efe9">
+        <img :src="previewDialog.url" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px" />
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
 .admin-page {
-  --bg-top: #eef4ff;
-  --bg-bottom: #f9fafb;
+  --bg-top: #fdfaf8;
+  --bg-bottom: #f6efe9;
   --panel: #ffffff;
-  --line: #d8dee9;
-  --text-main: #132238;
-  --text-sub: #4f5d75;
-  --brand: #1d4ed8;
+  --line: #e8ddd6;
+  --text-main: #2c1e16;
+  --text-sub: #7a6b62;
+  --brand: #5b6abf;
   --danger: #be123c;
+  --font-display: "LXGW WenKai", "Songti SC", "Noto Serif SC", serif;
+  --font-body: "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
 
   min-height: 100vh;
   background: linear-gradient(170deg, var(--bg-top), var(--bg-bottom));
   padding: 18px;
+  font-family: var(--font-body);
 }
 
 .layout-shell {
@@ -2930,7 +3266,7 @@ onBeforeUnmount(() => {
 }
 
 .left-menu {
-  border: 1px solid #dbe7f3;
+  border: 1px solid #e8ddd6;
   border-radius: 16px;
   background: #ffffff;
   padding: 20px 12px;
@@ -2945,7 +3281,7 @@ onBeforeUnmount(() => {
 
 .menu-brand {
   padding: 0 8px 12px;
-  border-bottom: 1px solid #eef2ff;
+  border-bottom: 1px solid #f6efe9;
   margin-bottom: 6px;
 }
 
@@ -2953,13 +3289,14 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 18px;
   font-weight: 700;
-  color: #0f172a;
+  color: #2c1e16;
+  font-family: var(--font-display);
 }
 
 .menu-sub {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #64748b;
+  color: #7a6b62;
 }
 
 .menu-item {
@@ -2969,7 +3306,7 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #334155;
+  color: #5a4e48;
   text-align: left;
   padding: 0 12px;
   cursor: pointer;
@@ -2979,17 +3316,17 @@ onBeforeUnmount(() => {
 }
 
 .menu-item:hover {
-  background: #f0f7ff;
+  background: rgba(91, 106, 191, 0.06);
 }
 
 .menu-item.active {
-  background: #eef3ff;
-  color: #1d4ed8;
+  background: rgba(91, 106, 191, 0.08);
+  color: #5b6abf;
   font-weight: 600;
 }
 
 .menu-item.ghost {
-  color: #64748b;
+  color: #7a6b62;
   font-size: 13px;
 }
 
@@ -3015,7 +3352,7 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #334155;
+  color: #5a4e48;
   cursor: pointer;
   padding: 0 12px;
   font-size: 14px;
@@ -3024,21 +3361,21 @@ onBeforeUnmount(() => {
 }
 
 .menu-group-btn:hover {
-  background: #f0f7ff;
+  background: rgba(91, 106, 191, 0.06);
 }
 
 .menu-group-btn.group-active {
-  color: #1d4ed8;
+  color: #5b6abf;
 }
 
 .menu-arrow {
   font-size: 11px;
-  color: #94a3b8;
+  color: #b5a89f;
 }
 
 .submenu {
   padding-left: 8px;
-  border-left: 2px solid #dbeafe;
+  border-left: 2px solid rgba(91, 106, 191, 0.12);
   margin: 2px 0 2px 14px;
   display: flex;
   flex-direction: column;
@@ -3050,7 +3387,7 @@ onBeforeUnmount(() => {
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: #475569;
+  color: #7a6b62;
   text-align: left;
   padding: 0 10px;
   cursor: pointer;
@@ -3060,19 +3397,19 @@ onBeforeUnmount(() => {
 }
 
 .submenu-item:hover {
-  background: #f0f7ff;
-  color: #334155;
+  background: rgba(91, 106, 191, 0.06);
+  color: #5a4e48;
 }
 
 .submenu-item.active {
-  background: #eef3ff;
-  color: #1d4ed8;
+  background: rgba(91, 106, 191, 0.08);
+  color: #5b6abf;
   font-weight: 600;
 }
 
 .menu-divider {
   height: 1px;
-  background: #f0f4f8;
+  background: #f6efe9;
   margin: 6px 4px;
 }
 
@@ -3094,6 +3431,7 @@ onBeforeUnmount(() => {
   margin: 6px 0 0;
   font-size: 30px;
   color: var(--text-main);
+  font-family: var(--font-display);
 }
 
 .sub {
@@ -3144,7 +3482,7 @@ h4 {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  background: #f8fbff;
+  background: #fdfaf8;
 }
 
 .stats-grid strong {
@@ -3198,7 +3536,7 @@ h4 {
 
 .selected-tip {
   font-size: 13px;
-  color: #475569;
+  color: #7a6b62;
 }
 
 .club-filter-row {
@@ -3272,8 +3610,8 @@ h4 {
 }
 
 .user-head {
-  background: #f8fafc;
-  color: #334155;
+  background: #fdfaf8;
+  color: #5a4e48;
   font-size: 13px;
   font-weight: 600;
 }
@@ -3286,12 +3624,12 @@ h4 {
 
 .col-name strong {
   font-size: 14px;
-  color: #0f172a;
+  color: #2c1e16;
 }
 
 .col-name span {
   font-size: 12px;
-  color: #64748b;
+  color: #7a6b62;
 }
 
 .role-tag {
@@ -3303,24 +3641,24 @@ h4 {
 }
 
 .role-tag.student {
-  color: #475569;
-  background: #e2e8f0;
+  color: #7a6b62;
+  background: #e8ddd6;
 }
 
 .role-tag.club-admin {
-  color: #1d4ed8;
-  background: #dbeafe;
+  color: #5b6abf;
+  background: rgba(91, 106, 191, 0.12);
 }
 
 .role-tag.school-admin {
-  color: #166534;
-  background: #dcfce7;
+  color: #167f73;
+  background: rgba(27, 158, 143, 0.12);
 }
 
 .empty-text {
   padding: 16px;
   text-align: center;
-  color: #64748b;
+  color: #7a6b62;
   font-size: 13px;
 }
 
@@ -3336,34 +3674,34 @@ h4 {
   flex: 1;
   min-width: 200px;
   padding: 7px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #e8ddd6;
   border-radius: 6px;
   font-size: 13px;
   outline: none;
 }
-.search-input:focus { border-color: #6366f1; }
+.search-input:focus { border-color: #5b6abf; }
 
 .filter-select {
   padding: 7px 10px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid #e8ddd6;
   border-radius: 6px;
   font-size: 13px;
   background: #fff;
   cursor: pointer;
   outline: none;
 }
-.filter-select:focus { border-color: #6366f1; }
+.filter-select:focus { border-color: #5b6abf; }
 
 .status-badge {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 10px;
   font-size: 12px;
-  background: #f1f5f9;
-  color: #64748b;
+  background: #f6efe9;
+  color: #7a6b62;
 }
 .status-badge.pending { background: #fef9c3; color: #a16207; }
-.status-badge.approved { background: #dcfce7; color: #15803d; }
+.status-badge.approved { background: rgba(27, 158, 143, 0.12); color: #178f82; }
 .status-badge.rejected { background: #fee2e2; color: #b91c1c; }
 .status-badge.anomaly { background: #fef3c7; color: #92400e; font-size: 11px; }
 
@@ -3381,13 +3719,13 @@ h4 {
 }
 
 .approve-btn {
-  background: #16a34a !important;
-  border-color: #16a34a !important;
+  background: #1b9e8f !important;
+  border-color: #1b9e8f !important;
   color: #fff !important;
   font-weight: 600;
 }
 .approve-btn:hover {
-  background: #15803d !important;
+  background: #178f82 !important;
 }
 
 .reject-btn {
@@ -3401,17 +3739,17 @@ h4 {
 }
 
 .close-btn {
-  background: #f1f5f9 !important;
-  border-color: #e2e8f0 !important;
-  color: #64748b !important;
+  background: #f6efe9 !important;
+  border-color: #e8ddd6 !important;
+  color: #7a6b62 !important;
 }
 .close-btn:hover {
-  background: #e2e8f0 !important;
+  background: #e8ddd6 !important;
 }
 
 .btn {
   height: 36px;
-  padding: 0 16px;
+  padding: 0 48px;
   border: none;
   border-radius: 10px;
   background: var(--brand);
@@ -3432,7 +3770,7 @@ h4 {
 }
 
 .success {
-  background: #16a34a;
+  background: #1b9e8f;
   color: #fff;
 }
 
@@ -3441,12 +3779,12 @@ h4 {
 }
 
 .task-pending {
-  background: #e5e7eb;
-  color: #374151;
+  background: #e8ddd6;
+  color: #5a4e48;
 }
 
 .task-done {
-  background: #22c55e;
+  background: #1b9e8f;
   color: #ffffff;
 }
 
@@ -3455,14 +3793,14 @@ h4 {
 }
 
 .btn-disabled {
-  background: #cbd5e1;
-  color: #475569;
+  background: #e8ddd6;
+  color: #7a6b62;
   cursor: not-allowed;
 }
 
 .btn-disabled:hover {
   filter: none;
-  background: #cbd5e1;
+  background: #e8ddd6;
 }
 
 .btn.disabled {
@@ -3504,14 +3842,14 @@ h4 {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #ffffff;
-  color: #475569;
+  color: #7a6b62;
   font-size: 20px;
   line-height: 1;
   cursor: pointer;
 }
 
 .icon-close-btn:hover {
-  background: #f8fafc;
+  background: #fdfaf8;
 }
 
 .detail-grid {
@@ -3530,12 +3868,12 @@ h4 {
 }
 
 .detail-grid span {
-  color: #64748b;
+  color: #7a6b62;
   font-size: 12px;
 }
 
 .detail-grid strong {
-  color: #0f172a;
+  color: #2c1e16;
   font-size: 14px;
   font-weight: 600;
   word-break: break-all;
@@ -3551,13 +3889,13 @@ h4 {
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 12px;
-  color: #334155;
-  background: #f1f5f9;
+  color: #5a4e48;
+  background: #f6efe9;
 }
 
 .apply-status-tag.approved {
-  color: #166534;
-  background: #dcfce7;
+  color: #167f73;
+  background: rgba(27, 158, 143, 0.12);
 }
 
 .apply-status-tag.rejected {
@@ -3566,8 +3904,8 @@ h4 {
 }
 
 .apply-status-tag.pending {
-  color: #334155;
-  background: #e2e8f0;
+  color: #5a4e48;
+  background: #e8ddd6;
 }
 
 .apply-status-tag.warning {
@@ -3584,13 +3922,13 @@ h4 {
 }
 
 .club-status-tag.normal {
-  color: #166534;
-  background: #dcfce7;
+  color: #167f73;
+  background: rgba(27, 158, 143, 0.12);
 }
 
 .club-status-tag.muted {
-  color: #334155;
-  background: #e2e8f0;
+  color: #5a4e48;
+  background: #e8ddd6;
 }
 
 .manage-edit-form {
@@ -3603,7 +3941,7 @@ h4 {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  color: #334155;
+  color: #5a4e48;
   font-size: 13px;
 }
 
@@ -3622,11 +3960,11 @@ h4 {
 
 .message {
   margin: 14px 0;
-  border: 1px solid #99f6e4;
-  background: #f0fdfa;
+  border: 1px solid rgba(27, 158, 143, 0.25);
+  background: rgba(27, 158, 143, 0.05);
   border-radius: 10px;
   padding: 10px 12px;
-  color: #0f766e;
+  color: #1b9e8f;
   font-size: 14px;
 }
 
@@ -3741,7 +4079,7 @@ h4 {
 }
 
 .income-color {
-  color: #16a34a !important;
+  color: #1b9e8f !important;
 }
 
 .expense-color {
@@ -3763,7 +4101,7 @@ h4 {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 14px;
-  background: #f8fbff;
+  background: #fdfaf8;
 }
 
 .chart-box h4 {
@@ -3813,5 +4151,121 @@ h4 {
   .finance-summary-row {
     grid-template-columns: 1fr;
   }
+}
+.red-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #ef4444;
+  border-radius: 50%;
+  margin-left: 6px;
+  flex-shrink: 0;
+}
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+.modal-mask .modal-box {
+  background: #fff;
+  border-radius: 14px;
+  width: min(720px, 95%);
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.18);
+  display: flex;
+  flex-direction: column;
+}
+.modal-mask .modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #f6efe9;
+}
+.modal-mask .modal-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.modal-mask .modal-close {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 18px;
+  color: #7a6b62;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-mask .modal-close:hover {
+  background: #f6efe9;
+}
+.modal-mask .modal-body {
+  padding: 16px 20px 20px;
+}
+.modal-mask .detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #fdfaf8;
+}
+.modal-mask .detail-row--block {
+  flex-direction: column;
+  gap: 4px;
+}
+.modal-mask .detail-label {
+  min-width: 90px;
+  color: #7a6b62;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.modal-mask .detail-text {
+  margin: 0;
+  white-space: pre-wrap;
+  color: #5a4e48;
+  font-size: 14px;
+}
+.simple-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 4px;
+}
+.simple-table th, .simple-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid #f6efe9;
+  text-align: left;
+}
+.simple-table th {
+  color: #7a6b62;
+  font-weight: 500;
+  background: #fdfaf8;
+}
+
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 8px 0;
+}
+
+.pagination-info {
+  font-size: 13px;
+  color: #7a6b62;
+}
+
+.btn-sm {
+  padding: 4px 12px;
+  font-size: 13px;
 }
 </style>

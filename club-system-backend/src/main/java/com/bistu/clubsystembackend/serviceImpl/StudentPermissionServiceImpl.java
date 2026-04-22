@@ -30,6 +30,8 @@ import com.bistu.clubsystembackend.util.CosUtil;
 import com.bistu.clubsystembackend.util.CurrentUser;
 import com.bistu.clubsystembackend.util.IdGenerator;
 import com.bistu.clubsystembackend.util.RoleCode;
+import lombok.extern.log4j.Log4j;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -412,7 +414,7 @@ public class StudentPermissionServiceImpl implements StudentPermissionService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void checkinByCode(StudentCheckinRequest request) {
-        CurrentUser user = AccessChecker.requireRole(RoleCode.STUDENT);
+        CurrentUser user = AccessChecker.requireRole(RoleCode.STUDENT, RoleCode.CLUB_ADMIN, RoleCode.SCHOOL_ADMIN);
         String checkinCode = request.getCheckinCode() == null ? null : request.getCheckinCode().trim();
         if (checkinCode == null || checkinCode.isEmpty()) {
             throw new BusinessException(BizCode.PARAM_INVALID.getCode(), "签到码不能为空");
@@ -423,8 +425,9 @@ public class StudentPermissionServiceImpl implements StudentPermissionService {
             if (target == null) {
                 throw new BusinessException(BizCode.PARAM_INVALID.getCode(), "活动不存在");
             }
-            Long matched = mapper.findEventIdByCheckinCode(checkinCode);
-            if (matched == null || !matched.equals(request.getEventId())) {
+            // 直接验证该活动的签到码是否匹配，不跨活动查询
+            Long matched = mapper.findEventIdByCheckinCodeAndEventId(checkinCode, request.getEventId());
+            if (matched == null) {
                 throw new BusinessException(BizCode.PARAM_INVALID.getCode(), "签到码错误");
             }
             eventId = request.getEventId();

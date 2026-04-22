@@ -1,10 +1,10 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, nextTick } from 'vue'
+import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../../../stores/auth'
 import {
-  createMyClubPositionApi,
-  deleteMyClubPositionApi,
+  createMyClubPositionApi,  deleteMyClubPositionApi,
   decideMyClubJoinApplyApi,
   getMyClubJoinApplyQueueApi,
   getMyClubPositionsApi,
@@ -37,6 +37,9 @@ import {
   getMyClubExpensesApi,
   getMyClubLedgerApi,
   getMyClubBalanceApi,
+  getMyCurrentReviewApi,
+  submitMyReviewApi,
+  getMyReviewsApi,
 } from '../../../api/user-permission'
 
 const router = useRouter()
@@ -72,12 +75,16 @@ const filteredMembers = computed(() => {
 })
 const positions = ref([])
 const joinApplyQueue = ref([])
+const memberPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const joinApplyPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
+const eventPagination = reactive({ pageNum: 1, pageSize: 10, total: 0 })
 const financeRecords = ref([])
 const myCancelApplies = ref([])
 const activeMenu = ref('profile')
 const clubInfoGroupExpanded = ref(true)
 const memberGroupExpanded = ref(true)
 const joinApplyLoading = ref(false)
+const joinApplyStatusFilter = ref('PENDING')
 const joinDecisionLoadingMap = reactive({})
 const joinDetailDialog = reactive({ visible: false, record: null })
 const memberPositionDraft = reactive({})
@@ -220,6 +227,16 @@ const normalizeJoinApplyStatus = (status) => {
   return 'PENDING'
 }
 
+const pendingJoinCount = ref(0)
+
+const refreshPendingJoinCount = async () => {
+  try {
+    const res = await getMyClubJoinApplyQueueApi({ pageNum: 1, pageSize: 1, status: 'PENDING' })
+    const data = getBizData(res)
+    pendingJoinCount.value = Number(data?.total ?? 0)
+  } catch { /* ignore */ }
+}
+
 // 根据 positionId 查对应层级，用于职位 badge 着色
 const getPositionLevelById = (positionId) => {
   if (!positionId) return 0
@@ -306,27 +323,26 @@ const buildPositionTree = (list) => {
   return roots
 }
 
-// 将树展开为带连接线前缀的扁平列表
-const flattenTree = (nodes, parentPrefix = '') => {
+// 将树展开为带深度信息的扁平列表
+const collapsedNodes = reactive({})
+const toggleTreeNode = (id) => { collapsedNodes[String(id)] = !collapsedNodes[String(id)] }
+
+const flattenTree = (nodes, depth = 0, parentCollapsed = false) => {
   const result = []
   nodes.forEach((node, i) => {
     const isLast = i === nodes.length - 1
-    const connector = parentPrefix === '' ? '' : (isLast ? '└─ ' : '├─ ')
-    const childPrefix = parentPrefix === '' ? '' : (isLast ? '   ' : '│  ')
-    result.push({
-      node,
-      prefix: parentPrefix + connector,
-      depth: (parentPrefix.match(/[│ ]/g) || []).length / 3,
-      isLast,
-    })
-    if (node.children && node.children.length) {
-      result.push(...flattenTree(node.children, parentPrefix + childPrefix))
+    const hasChildren = node.children && node.children.length > 0
+    const collapsed = !!collapsedNodes[String(node.id)]
+    result.push({ node, depth, isLast, hasChildren, collapsed })
+    if (hasChildren && !collapsed) {
+      result.push(...flattenTree(node.children, depth + 1))
     }
   })
   return result
 }
 
-const flattenedPositions = computed(() => flattenTree(buildPositionTree(positions.value)))
+const positionTree = computed(() => buildPositionTree(positions.value))
+const flattenedPositions = computed(() => flattenTree(positionTree.value))
 
 const findPositionById = (id) => {
   const target = String(id)
@@ -493,7 +509,7 @@ const loadData = async () => {
   try {
     const [profileRes, membersRes, financeRes] = await Promise.all([
       getMyClubProfileApi(),
-      getMyClubMembersApi({ pageNum: 1, pageSize: 200 }),
+      getMyClubMembersApi({ pageNum: memberPagination.pageNum, pageSize: memberPagination.pageSize }),
       getMyClubFinanceApi({ pageNum: 1, pageSize: 10 }),
     ])
     const profile = getBizData(profileRes) || {}
@@ -509,6 +525,7 @@ const loadData = async () => {
     const memberData = getBizData(membersRes)
     const financeData = getBizData(financeRes)
     members.value = Array.isArray(memberData?.records) ? memberData.records : Array.isArray(memberData) ? memberData : []
+    memberPagination.total = Number(memberData?.total ?? members.value.length) || 0
     hydrateMemberPositionDraft()
     financeRecords.value = Array.isArray(financeData?.records)
       ? financeData.records
@@ -632,6 +649,18 @@ const getCancelStatusClass = (status) => {
   return 'pending'
 }
 
+const loadMembers = async () => {
+  try {
+    const response = await getMyClubMembersApi({ pageNum: memberPagination.pageNum, pageSize: memberPagination.pageSize })
+    const data = getBizData(response)
+    members.value = Array.isArray(data?.records) ? data.records : Array.isArray(data) ? data : []
+    memberPagination.total = Number(data?.total ?? members.value.length) || 0
+    hydrateMemberPositionDraft()
+  } catch (error) {
+    feedback.value = error?.response?.data?.message || error?.message || '成员列表加载失败'
+  }
+}
+
 const loadMyCancelApplies = async () => {
   cancelListLoading.value = true
   try {
@@ -648,14 +677,25 @@ const loadMyCancelApplies = async () => {
 const loadMyClubJoinApplyQueue = async () => {
   joinApplyLoading.value = true
   try {
-    const response = await getMyClubJoinApplyQueueApi({ pageNum: 1, pageSize: 50 })
+    const params = { pageNum: joinApplyPagination.pageNum, pageSize: joinApplyPagination.pageSize }
+    if (joinApplyStatusFilter.value !== 'ALL') {
+      params.status = joinApplyStatusFilter.value
+    }
+    const response = await getMyClubJoinApplyQueueApi(params)
     const data = getBizData(response)
     joinApplyQueue.value = Array.isArray(data?.records) ? data.records : Array.isArray(data) ? data : []
+    joinApplyPagination.total = Number(data?.total ?? joinApplyQueue.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '入社申请队列加载失败'
   } finally {
     joinApplyLoading.value = false
   }
+}
+
+const switchJoinApplyFilter = (status) => {
+  joinApplyStatusFilter.value = status
+  joinApplyPagination.pageNum = 1
+  loadMyClubJoinApplyQueue()
 }
 
 const decideJoinApply = async (record, decision) => {
@@ -678,7 +718,7 @@ const decideJoinApply = async (record, decision) => {
     })
     getBizData(response)
     feedback.value = decision === 'APPROVE' ? '入社申请已通过' : '入社申请已驳回'
-    await Promise.all([loadMyClubJoinApplyQueue(), loadData()])
+    await Promise.all([loadMyClubJoinApplyQueue(), loadData(), refreshPendingJoinCount()])
   } catch (error) {
     feedback.value = error?.response?.data?.message || error?.message || '审批操作失败'
   } finally {
@@ -822,9 +862,10 @@ const removeMember = async (member) => {
 const loadMyEvents = async () => {
   eventLoading.value = true
   try {
-    const response = await getMyClubEventsApi({ pageNum: 1, pageSize: 50 })
+    const response = await getMyClubEventsApi({ pageNum: eventPagination.pageNum, pageSize: eventPagination.pageSize })
     const data = getBizData(response)
     eventList.value = Array.isArray(data?.records) ? data.records : []
+    eventPagination.total = Number(data?.total ?? eventList.value.length) || 0
   } catch (error) {
     feedback.value = error?.response?.data?.message || '活动列表加载失败'
   } finally { eventLoading.value = false }
@@ -1350,10 +1391,120 @@ const handleLogout = () => {
   router.push('/login')
 }
 
+// ===== Club Review (年审) =====
+const currentReview = ref(null)
+const reviewLoading = ref(false)
+const reviewSubmitting = ref(false)
+const reviewDetailVisible = ref(false)
+const reviewForm = reactive({ summaryText: '', attachmentUrl: '' })
+const myReviews = ref([])
+const myReviewsTotal = ref(0)
+
+const loadCurrentReview = async () => {
+  reviewLoading.value = true
+  try {
+    const res = await getMyCurrentReviewApi()
+    const data = getBizData(res)
+    currentReview.value = data
+  } catch (e) {
+    currentReview.value = null
+  } finally {
+    reviewLoading.value = false
+  }
+}
+
+const handleReviewFileUpload = async (e) => {
+  const file = e.target.files?.[0]
+  if (!file) return
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('bizType', 'CLUB_APPLY_CHARTER')
+    const res = await uploadClubApplyMaterialApi(formData)
+    const data = getBizData(res)
+    reviewForm.attachmentUrl = data?.url || ''
+    feedback.value = '文件上传成功'
+  } catch (err) {
+    feedback.value = err?.response?.data?.message || '文件上传失败'
+  }
+}
+
+const submitReview = async () => {
+  if (!reviewForm.summaryText.trim()) { feedback.value = '请填写年度工作总结'; return }
+  reviewSubmitting.value = true
+  try {
+    await submitMyReviewApi({ summaryText: reviewForm.summaryText.trim(), attachmentUrl: reviewForm.attachmentUrl || null })
+    feedback.value = '年审报告提交成功'
+    reviewForm.summaryText = ''
+    reviewForm.attachmentUrl = ''
+    await loadCurrentReview()
+  } catch (e) {
+    feedback.value = e?.response?.data?.message || '提交失败'
+  } finally {
+    reviewSubmitting.value = false
+  }
+}
+
+const loadMyReviews = async () => {
+  try {
+    const res = await getMyReviewsApi({ pageNum: 1, pageSize: 50 })
+    const data = getBizData(res)
+    myReviews.value = Array.isArray(data?.records) ? data.records : []
+    myReviewsTotal.value = data?.total || 0
+  } catch (e) { /* ignore */ }
+}
+
+const reviewStatusText = (s) => {
+  const m = { 1: '待提交', 2: '待审核', 3: '已通过', 4: '已驳回', 5: '整改中' }
+  return m[s] || '未知'
+}
+
+const reviewStatusClass = (s) => {
+  const m = { 1: 'pending', 2: 'pending', 3: 'done', 4: 'rejected', 5: 'pending' }
+  return m[s] || ''
+}
+
+// ===== 二维码签到 =====
+const qrDialog = reactive({ visible: false, code: '', title: '' })
+const qrCanvasRef = ref(null)
+
+const showQrCode = async (event) => {
+  if (!event?.checkinCode) return
+  qrDialog.code = event.checkinCode
+  qrDialog.title = event.title || ''
+  qrDialog.visible = true
+  await nextTick()
+  const base = import.meta.env.BASE_URL || '/'
+  const url = `${window.location.origin}${base}checkin?code=${encodeURIComponent(event.checkinCode)}&eventId=${event.id}`
+  if (qrCanvasRef.value) {
+    QRCode.toCanvas(qrCanvasRef.value, url, { width: 240, margin: 2 })
+  }
+}
+
+// ===== 文件在线预览 =====
+const previewDialog = reactive({ visible: false, url: '', type: '' })
+const openPreview = (url) => {
+  if (!url) return
+  const ext = url.split('.').pop().split('?')[0].toLowerCase()
+  if (['jpg','jpeg','png','gif','bmp','webp'].includes(ext)) {
+    previewDialog.type = 'image'
+  } else if (ext === 'pdf') {
+    previewDialog.type = 'pdf'
+  } else if (['doc','docx'].includes(ext)) {
+    previewDialog.type = 'office'
+  } else {
+    window.open(url, '_blank')
+    return
+  }
+  previewDialog.url = url
+  previewDialog.visible = true
+}
+
 onMounted(() => {
   loadData()
   loadMyCancelApplies()
   loadMyClubJoinApplyQueue()
+  refreshPendingJoinCount()
   loadMyEvents()
 })
 </script>
@@ -1401,6 +1552,7 @@ onMounted(() => {
             @click="memberGroupExpanded = !memberGroupExpanded"
           >
             <span>成员管理</span>
+            <span v-if="pendingJoinCount > 0 && !memberGroupExpanded" class="pending-dot"></span>
             <span class="menu-arrow">{{ memberGroupExpanded ? '▾' : '▸' }}</span>
           </button>
           <div v-show="memberGroupExpanded" class="submenu">
@@ -1421,7 +1573,7 @@ onMounted(() => {
               class="submenu-item"
               :class="{ active: activeMenu === 'join-approval' }"
               @click="activeMenu = 'join-approval'"
-            >入社审批</button>
+            >入社审批<span v-if="pendingJoinCount > 0" class="pending-dot"></span></button>
           </div>
         </div>
 
@@ -1463,6 +1615,7 @@ onMounted(() => {
           </div>
         </div>
         <button type="button" class="menu-item" :class="{ active: activeMenu === 'events' }" @click="activeMenu = 'events'">活动管理</button>
+        <button type="button" class="menu-item" :class="{ active: activeMenu === 'review' }" @click="activeMenu = 'review'; loadCurrentReview()">年审报告</button>
         <button type="button" class="menu-item menu-item-danger" :class="{ active: activeMenu === 'cancel' }" @click="activeMenu = 'cancel'">
           社团注销
         </button>
@@ -1597,6 +1750,11 @@ onMounted(() => {
                 </tr>
               </tbody>
             </table>
+            <div v-if="memberPagination.total > memberPagination.pageSize" class="pagination-bar">
+              <button type="button" class="btn ghost btn-sm" :disabled="memberPagination.pageNum <= 1" @click="memberPagination.pageNum--; loadMembers()">上一页</button>
+              <span class="pagination-info">第 {{ memberPagination.pageNum }} 页 / 共 {{ Math.ceil(memberPagination.total / memberPagination.pageSize) }} 页（共 {{ memberPagination.total }} 人）</span>
+              <button type="button" class="btn ghost btn-sm" :disabled="memberPagination.pageNum >= Math.ceil(memberPagination.total / memberPagination.pageSize)" @click="memberPagination.pageNum++; loadMembers()">下一页</button>
+            </div>
           </div>
         </section>
 
@@ -1606,6 +1764,21 @@ onMounted(() => {
             <button type="button" class="btn ghost" :disabled="joinApplyLoading" @click="loadMyClubJoinApplyQueue">
               {{ joinApplyLoading ? '加载中...' : '刷新队列' }}
             </button>
+          </div>
+
+          <div class="join-apply-tabs">
+            <button
+              v-for="tab in [
+                { key: 'PENDING', label: '待审批' },
+                { key: 'JOINED', label: '已通过' },
+                { key: 'REJECTED', label: '已驳回' },
+              ]"
+              :key="tab.key"
+              type="button"
+              class="join-apply-tab"
+              :class="{ active: joinApplyStatusFilter === tab.key }"
+              @click="switchJoinApplyFilter(tab.key)"
+            >{{ tab.label }}</button>
           </div>
 
           <table v-if="joinApplyQueue.length > 0" class="apply-table">
@@ -1652,7 +1825,12 @@ onMounted(() => {
               </tr>
             </tbody>
           </table>
-          <p v-else class="empty-text">暂无入社申请待审批</p>
+          <p v-if="joinApplyQueue.length === 0" class="empty-text">{{ joinApplyStatusFilter === 'PENDING' ? '暂无待审批的入社申请' : joinApplyStatusFilter === 'JOINED' ? '暂无已通过的入社申请' : joinApplyStatusFilter === 'REJECTED' ? '暂无已驳回的入社申请' : '暂无入社申请记录' }}</p>
+          <div v-if="joinApplyPagination.total > joinApplyPagination.pageSize" class="pagination-bar">
+            <button type="button" class="btn ghost btn-sm" :disabled="joinApplyPagination.pageNum <= 1" @click="joinApplyPagination.pageNum--; loadMyClubJoinApplyQueue()">上一页</button>
+            <span class="pagination-info">第 {{ joinApplyPagination.pageNum }} 页 / 共 {{ Math.ceil(joinApplyPagination.total / joinApplyPagination.pageSize) }} 页（共 {{ joinApplyPagination.total }} 条）</span>
+            <button type="button" class="btn ghost btn-sm" :disabled="joinApplyPagination.pageNum >= Math.ceil(joinApplyPagination.total / joinApplyPagination.pageSize)" @click="joinApplyPagination.pageNum++; loadMyClubJoinApplyQueue()">下一页</button>
+          </div>
         </section>
 
         <section v-show="activeMenu === 'events'" class="panel">
@@ -1681,7 +1859,7 @@ onMounted(() => {
                     class="btn sm"
                     style="background:#f59e0b;border-color:#f59e0b;color:#fff"
                     :disabled="ev.eventStatus !== 5"
-                    :style="ev.eventStatus !== 5 ? 'opacity: 0.5; cursor: not-allowed; background:#d1d5db; border-color:#d1d5db;' : 'background:#f59e0b;border-color:#f59e0b;'"
+                    :style="ev.eventStatus !== 5 ? 'opacity: 0.5; cursor: not-allowed; background:#e8ddd6; border-color:#e8ddd6;' : 'background:#f59e0b;border-color:#f59e0b;'"
                     @click="ev.eventStatus === 5 ? openEditEvent(ev) : null"
                   >修改并提交</button>
                   <button
@@ -1709,7 +1887,12 @@ onMounted(() => {
               </tr>
             </tbody>
           </table>
-          <p v-else class="empty-text">暂无活动记录</p>
+          <p v-if="eventList.length === 0" class="empty-text">暂无活动记录</p>
+          <div v-if="eventPagination.total > eventPagination.pageSize" class="pagination-bar">
+            <button type="button" class="btn ghost btn-sm" :disabled="eventPagination.pageNum <= 1" @click="eventPagination.pageNum--; loadMyEvents()">上一页</button>
+            <span class="pagination-info">第 {{ eventPagination.pageNum }} 页 / 共 {{ Math.ceil(eventPagination.total / eventPagination.pageSize) }} 页（共 {{ eventPagination.total }} 条）</span>
+            <button type="button" class="btn ghost btn-sm" :disabled="eventPagination.pageNum >= Math.ceil(eventPagination.total / eventPagination.pageSize)" @click="eventPagination.pageNum++; loadMyEvents()">下一页</button>
+          </div>
         </section>
 
         <section v-show="activeMenu === 'org'" class="panel">
@@ -1755,9 +1938,15 @@ onMounted(() => {
                   v-for="item in flattenedPositions"
                   :key="item.node.id"
                   class="org-tree-row"
-                  :class="{ 'org-tree-row--root': !item.prefix }"
+                  :class="{ 'org-tree-row--root': item.depth === 0 }"
+                  :style="{ paddingLeft: (item.depth * 28 + 10) + 'px' }"
                 >
-                  <span class="org-tree-prefix">{{ item.prefix }}</span>
+                  <span
+                    v-if="item.hasChildren"
+                    class="tree-toggle"
+                    @click="toggleTreeNode(item.node.id)"
+                  >{{ item.collapsed ? '▸' : '▾' }}</span>
+                  <span v-else class="tree-toggle tree-toggle--leaf"></span>
                   <span class="org-tree-name">{{ item.node.positionName }}</span>
                   <span
                     class="org-level-badge"
@@ -1824,7 +2013,7 @@ onMounted(() => {
             </div>
             <div class="balance-card">
               <span class="balance-label">可用余额</span>
-              <span class="balance-value" :style="{ color: myAvailableBalance != null && Number(myAvailableBalance) <= 0 ? '#dc2626' : '#059669' }">
+              <span class="balance-value" :style="{ color: myAvailableBalance != null && Number(myAvailableBalance) <= 0 ? '#dc2626' : '#1b9e8f' }">
                 {{ myAvailableBalance != null ? '¥ ' + Number(myAvailableBalance).toFixed(2) : '暂无数据' }}
               </span>
             </div>
@@ -1847,7 +2036,7 @@ onMounted(() => {
                       {{ item.typeName || (item.type === 'INCOME' ? '收入' : '支出') }}
                     </span>
                   </td>
-                  <td :style="{ color: item.type === 'INCOME' ? '#059669' : '#dc2626', fontWeight: 600 }">
+                  <td :style="{ color: item.type === 'INCOME' ? '#1b9e8f' : '#dc2626', fontWeight: 600 }">
                     {{ item.type === 'INCOME' ? '+' : '-' }}{{ Number(item.amount || 0).toFixed(2) }}
                   </td>
                   <td>
@@ -1922,11 +2111,11 @@ onMounted(() => {
               <tbody>
                 <tr v-for="item in incomeList" :key="item.id">
                   <td>{{ INCOME_TYPE_MAP[item.incomeType] || item.incomeType || '-' }}</td>
-                  <td style="color:#059669;font-weight:600">+{{ Number(item.amount || 0).toFixed(2) }}</td>
+                  <td style="color:#1b9e8f;font-weight:600">+{{ Number(item.amount || 0).toFixed(2) }}</td>
                   <td>{{ item.sourceDesc || '-' }}</td>
                   <td class="td-secondary">{{ item.occurAt ? item.occurAt.slice(0, 16).replace('T', ' ') : '-' }}</td>
                   <td>
-                    <a v-if="item.proofUrl" :href="item.proofUrl" target="_blank" style="color:#0f766e;text-decoration:underline">查看</a>
+                    <a v-if="item.proofUrl" style="cursor:pointer;color:#1b9e8f;text-decoration:underline" @click="openPreview(item.proofUrl)">预览</a>
                     <span v-else class="td-secondary">-</span>
                   </td>
                 </tr>
@@ -1953,7 +2142,7 @@ onMounted(() => {
           </div>
           <div v-if="myAvailableBalance != null" class="available-balance-hint" :class="{ warn: Number(myAvailableBalance) <= 0 }">
             可用余额：¥ {{ Number(myAvailableBalance).toFixed(2) }}
-            <span v-if="myPendingExpense != null && Number(myPendingExpense) > 0" style="color:#64748b">
+            <span v-if="myPendingExpense != null && Number(myPendingExpense) > 0" style="color:#7a6b62">
               （余额 {{ Number(myBalance).toFixed(2) }} - 待审核 {{ Number(myPendingExpense).toFixed(2) }}）
             </span>
           </div>
@@ -2031,7 +2220,7 @@ onMounted(() => {
                   </td>
                   <td class="td-secondary">{{ item.expenseDesc || '-' }}</td>
                   <td>
-                    <a v-if="item.invoiceUrl" :href="item.invoiceUrl" target="_blank" style="color:#0f766e;text-decoration:underline">查看</a>
+                    <a v-if="item.invoiceUrl" style="cursor:pointer;color:#1b9e8f;text-decoration:underline" @click="openPreview(item.invoiceUrl)">预览</a>
                     <span v-else class="td-secondary">-</span>
                   </td>
                   <td>
@@ -2084,7 +2273,7 @@ onMounted(() => {
                   发票/凭证上传（可重新上传）
                   <input type="file" @change="e => resubmitForm.invoiceFile = e.target.files?.[0] || null" />
                   <span v-if="resubmitForm.invoiceUrl && !resubmitForm.invoiceFile" class="td-secondary" style="font-size:12px">
-                    已有凭证：<a :href="resubmitForm.invoiceUrl" target="_blank" style="color:#0f766e">查看</a>
+                    已有凭证：<a style="cursor:pointer;color:#1b9e8f" @click="openPreview(resubmitForm.invoiceUrl)">预览</a>
                   </span>
                 </label>
                 <label class="full">
@@ -2110,7 +2299,7 @@ onMounted(() => {
               <button type="button" class="btn ghost btn-sm" @click="balanceAlertVisible = false">×</button>
             </div>
             <div style="padding:16px 20px 20px">
-              <p style="line-height:1.8;color:#334155">{{ balanceAlertMessage }}</p>
+              <p style="line-height:1.8;color:#5a4e48">{{ balanceAlertMessage }}</p>
               <div class="action-row" style="margin-top:16px;justify-content:flex-end">
                 <button type="button" class="btn" @click="balanceAlertVisible = false">知道了</button>
               </div>
@@ -2160,7 +2349,7 @@ onMounted(() => {
                       {{ item.bizTypeName || (item.bizType === 1 ? '收入' : '支出') }}
                     </span>
                   </td>
-                  <td :style="{ color: Number(item.changeAmount) >= 0 ? '#059669' : '#dc2626', fontWeight: 600 }">
+                  <td :style="{ color: Number(item.changeAmount) >= 0 ? '#1b9e8f' : '#dc2626', fontWeight: 600 }">
                     {{ Number(item.changeAmount) >= 0 ? '+' : '' }}{{ Number(item.changeAmount || 0).toFixed(2) }}
                   </td>
                   <td style="font-weight:500">{{ Number(item.balanceAfter || 0).toFixed(2) }}</td>
@@ -2177,6 +2366,112 @@ onMounted(() => {
             <button type="button" class="btn ghost btn-sm" :disabled="ledgerPagination.pageNum >= Math.ceil(ledgerPagination.total / ledgerPagination.pageSize)" @click="ledgerPagination.pageNum++; loadLedger()">下一页</button>
           </div>
         </section>
+
+        <!-- 年审报告 -->
+        <section v-show="activeMenu === 'review'" class="panel">
+          <div class="section-head">
+            <h3>年审报告</h3>
+            <button type="button" class="btn ghost btn-sm" @click="loadMyReviews">历年记录</button>
+          </div>
+
+          <div v-if="reviewLoading" class="empty-tip">加载中...</div>
+          <div v-else-if="!currentReview" class="empty-tip">暂无进行中的年审，请等待学校管理员开启年审窗口。</div>
+          <div v-else>
+            <!-- 状态卡片 -->
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;padding:14px;background:#f9fafb;border-radius:8px;border:1px solid #e8ddd6">
+              <span style="font-size:16px;font-weight:600">{{ currentReview.reviewYear }}年度年审</span>
+              <span :class="['cancel-status-tag', reviewStatusClass(currentReview.reviewStatus)]">{{ reviewStatusText(currentReview.reviewStatus) }}</span>
+              <span v-if="currentReview.score" style="color:#6b7280">评分：{{ currentReview.score }}</span>
+              <span style="flex:1"></span>
+              <button type="button" class="btn btn-sm" @click="reviewDetailVisible = true">查看详情</button>
+            </div>
+
+            <div v-if="currentReview.rejectReason" style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:10px;margin-bottom:12px;color:#dc2626">
+              驳回原因：{{ currentReview.rejectReason }}
+            </div>
+
+            <!-- 数据概览 -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-bottom:16px">
+              <div class="stat-card"><div class="stat-label">年度总收入</div><div class="stat-value">{{ Number(currentReview.totalIncome || 0).toFixed(2) }}</div></div>
+              <div class="stat-card"><div class="stat-label">年度总支出</div><div class="stat-value">{{ Number(currentReview.totalExpense || 0).toFixed(2) }}</div></div>
+              <div class="stat-card"><div class="stat-label">当前余额</div><div class="stat-value">{{ Number(currentReview.balance || 0).toFixed(2) }}</div></div>
+              <div class="stat-card"><div class="stat-label">在籍成员</div><div class="stat-value">{{ currentReview.memberCount || 0 }}人</div></div>
+              <div class="stat-card"><div class="stat-label">年度活动</div><div class="stat-value">{{ currentReview.eventCount || 0 }}次</div></div>
+            </div>
+
+            <div v-if="!currentReview.reviewWindowOpen && (currentReview.reviewStatus === 1 || currentReview.reviewStatus === 4)" style="padding:10px;background:#fef9c3;border:1px solid #fde047;border-radius:6px;color:#854d0e;margin-top:12px">
+              年审窗口已关闭，暂时无法提交。请等待学校管理员重新开启。
+            </div>
+            <!-- 提交表单（窗口开放 + 待提交/已驳回时显示） -->
+            <div v-if="currentReview.reviewWindowOpen && (currentReview.reviewStatus === 1 || currentReview.reviewStatus === 4)" style="border-top:1px solid #e8ddd6;padding-top:16px">
+              <h4>{{ currentReview.reviewStatus === 4 ? '整改后重新提交' : '提交年审报告' }}</h4>
+              <label style="display:block;margin:8px 0">
+                年度工作总结
+                <textarea v-model="reviewForm.summaryText" rows="5" style="width:100%;margin-top:4px;padding:8px;border:1px solid #e8ddd6;border-radius:6px" placeholder="请填写本年度社团工作总结、重要成果、存在问题等..."></textarea>
+              </label>
+              <label style="display:block;margin:8px 0">
+                补充材料（可选）
+                <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+                  <input type="file" @change="handleReviewFileUpload" />
+                  <span v-if="reviewForm.attachmentUrl" style="color:#1b9e8f;font-size:13px">已上传</span>
+                </div>
+              </label>
+              <button type="button" class="btn" :disabled="reviewSubmitting" @click="submitReview" style="margin-top:8px">
+                {{ reviewSubmitting ? '提交中...' : '提交年审报告' }}
+              </button>
+            </div>
+
+            <!-- 已提交/已通过时展示总结内容 -->
+            <div v-if="currentReview.summaryText && (currentReview.reviewStatus === 2 || currentReview.reviewStatus === 3)" style="margin-top:16px;border-top:1px solid #e8ddd6;padding-top:12px">
+              <h4>年度工作总结</h4>
+              <p style="white-space:pre-wrap;color:#374151;margin-top:6px">{{ currentReview.summaryText }}</p>
+            </div>
+          </div>
+
+          <!-- 历年记录 -->
+          <div v-if="myReviews.length" style="margin-top:24px;border-top:1px solid #e8ddd6;padding-top:16px">
+            <h4>历年年审记录</h4>
+            <table class="member-table" style="margin-top:8px">
+              <thead><tr><th>年份</th><th>状态</th><th>评分</th><th>提交时间</th></tr></thead>
+              <tbody>
+                <tr v-for="r in myReviews" :key="r.id">
+                  <td>{{ r.reviewYear }}</td>
+                  <td><span :class="['cancel-status-tag', reviewStatusClass(r.reviewStatus)]">{{ reviewStatusText(r.reviewStatus) }}</span></td>
+                  <td>{{ r.score ?? '-' }}</td>
+                  <td class="td-secondary">{{ r.updatedAt ? r.updatedAt.slice(0,10) : '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 年审详情弹窗（社团管理员） -->
+        <div v-if="reviewDetailVisible && currentReview" class="modal-overlay" @click.self="reviewDetailVisible = false">
+          <div class="modal-box" style="width:min(720px,95%)">
+            <div class="modal-head">
+              <h3>{{ currentReview.reviewYear }}年度年审详情</h3>
+              <button type="button" class="modal-close" @click="reviewDetailVisible = false">×</button>
+            </div>
+            <div class="modal-content" style="max-height:70vh;overflow-y:auto">
+              <div class="detail-row"><span class="detail-label">年审状态</span><span :class="['cancel-status-tag', reviewStatusClass(currentReview.reviewStatus)]">{{ reviewStatusText(currentReview.reviewStatus) }}</span></div>
+              <div v-if="currentReview.score" class="detail-row"><span class="detail-label">评分</span><span>{{ currentReview.score }}</span></div>
+              <div class="detail-row"><span class="detail-label">年度总收入</span><span style="color:#1b9e8f;font-weight:600">{{ Number(currentReview.totalIncome||0).toFixed(2) }} 元</span></div>
+              <div class="detail-row"><span class="detail-label">年度总支出</span><span style="color:#dc2626;font-weight:600">{{ Number(currentReview.totalExpense||0).toFixed(2) }} 元</span></div>
+              <div class="detail-row"><span class="detail-label">当前余额</span><span style="font-weight:600">{{ Number(currentReview.balance||0).toFixed(2) }} 元</span></div>
+              <div class="detail-row"><span class="detail-label">在籍成员</span><span>{{ currentReview.memberCount||0 }} 人</span></div>
+              <div class="detail-row"><span class="detail-label">年度活动</span><span>{{ currentReview.eventCount||0 }} 次</span></div>
+
+              <div v-if="currentReview.summaryText" class="detail-row detail-row--block">
+                <span class="detail-label">年度工作总结</span>
+                <p class="detail-text">{{ currentReview.summaryText }}</p>
+              </div>
+              <div v-if="currentReview.attachmentUrl" class="detail-row">
+                <span class="detail-label">补充材料</span>
+                <a style="cursor:pointer;color:#e0583a;text-decoration:underline" @click="openPreview(currentReview.attachmentUrl)">在线预览</a>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <section v-show="activeMenu === 'cancel'" class="panel">
           <div class="section-head">
@@ -2218,16 +2513,9 @@ onMounted(() => {
                 </p>
                 <p>申请原因：{{ record.applyReason || record.reason || '-' }}</p>
                 <p>提交时间：{{ record.createdAt || record.submittedAt || '-' }}</p>
-                <a
-                  class="btn ghost"
-                  :class="{ disabled: !(record.assetSettlementUrl || record.assetSettlementFileUrl) }"
-                  :href="record.assetSettlementUrl || record.assetSettlementFileUrl || undefined"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  download
-                >
-                  下载资产清算报告
-                </a>
+                <button type="button" class="btn ghost" :disabled="!(record.assetSettlementUrl || record.assetSettlementFileUrl)" @click="openPreview(record.assetSettlementUrl || record.assetSettlementFileUrl)">
+                  预览资产清算报告
+                </button>
               </li>
             </ul>
             <p v-else class="empty-text">暂无社团注销申请记录</p>
@@ -2327,8 +2615,12 @@ onMounted(() => {
           <div class="detail-row"><span class="detail-label">人数上限</span><span>{{ eventDetailDialog.event?.limitCount || '不限' }}</span></div>
           <div class="detail-row"><span class="detail-label">报名/签到</span><span>{{ eventDetailDialog.event?.signupCount ?? 0 }} / {{ eventDetailDialog.event?.checkinCount ?? 0 }}</span></div>
           <div v-if="eventDetailDialog.event?.content" class="detail-row detail-row--block"><span class="detail-label">活动内容</span><p class="detail-text">{{ eventDetailDialog.event.content }}</p></div>
-          <div v-if="eventDetailDialog.event?.safetyPlanUrl" class="detail-row"><span class="detail-label">安全预案</span><a :href="eventDetailDialog.event.safetyPlanUrl" target="_blank">下载查看</a></div>
-          <div v-if="eventDetailDialog.event?.checkinCode" class="detail-row"><span class="detail-label">签到码</span><span style="font-weight:600;color:#10b981">{{ eventDetailDialog.event.checkinCode }}</span></div>
+          <div v-if="eventDetailDialog.event?.safetyPlanUrl" class="detail-row"><span class="detail-label">安全预案</span><a style="cursor:pointer;color:#e0583a" @click="openPreview(eventDetailDialog.event.safetyPlanUrl)">在线预览</a></div>
+          <div v-if="eventDetailDialog.event?.checkinCode" class="detail-row">
+            <span class="detail-label">签到码</span>
+            <span style="font-weight:600;color:#1b9e8f">{{ eventDetailDialog.event.checkinCode }}</span>
+            <button type="button" class="btn btn-sm" style="margin-left:8px" @click="showQrCode(eventDetailDialog.event)">显示二维码</button>
+          </div>
           <div v-if="eventDetailDialog.event?.eventStatus === 5" class="detail-row detail-row--block"><span class="detail-label">驳回原因</span><p class="detail-text" style="color:#ef4444">{{ eventDetailDialog.event.rejectReason || '-' }}</p></div>
         </div>
         <div class="modal-foot">
@@ -2401,14 +2693,14 @@ onMounted(() => {
             <div v-if="summaryData.summaryImages && summaryData.summaryImages.length > 0" class="detail-row detail-row--block">
               <span class="detail-label">活动图片</span>
               <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
-                <img v-for="(img, idx) in summaryData.summaryImages" :key="idx" :src="img" style="width:120px;height:120px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid #e5e7eb" @click="window.open(img, '_blank')" alt="活动图片" />
+                <img v-for="(img, idx) in summaryData.summaryImages" :key="idx" :src="img" style="width:120px;height:120px;object-fit:cover;border-radius:4px;cursor:pointer;border:2px solid #e8ddd6" @click="window.open(img, '_blank')" alt="活动图片" />
               </div>
             </div>
             <div class="detail-row"><span class="detail-label">反馈评分</span><span>{{ summaryData.feedbackScore ?? '-' }}</span></div>
             <div v-if="summaryData.issueReflection" class="detail-row detail-row--block"><span class="detail-label">问题反思</span><p class="detail-text">{{ summaryData.issueReflection }}</p></div>
             <div v-if="summaryData.attachmentUrl" class="detail-row detail-row--block">
               <span class="detail-label">附件</span>
-              <a :href="summaryData.attachmentUrl" target="_blank" style="color:#0f766e;text-decoration:underline">下载附件</a>
+              <a style="cursor:pointer;color:#1b9e8f;text-decoration:underline" @click="openPreview(summaryData.attachmentUrl)">在线预览</a>
             </div>
           </template>
           <template v-else>
@@ -2418,18 +2710,18 @@ onMounted(() => {
               <div style="margin-top:4px">
                 <input ref="imageFileInput" type="file" accept="image/*" multiple @change="handleImageSelect" style="display:none" />
                 <button type="button" class="btn sm" @click="$refs.imageFileInput.click()">选择图片</button>
-                <span v-if="summaryForm.summaryImages.length > 0 || summaryForm.imageFiles.length > 0" style="margin-left:8px;font-size:12px;color:#0f766e;font-weight:500">
+                <span v-if="summaryForm.summaryImages.length > 0 || summaryForm.imageFiles.length > 0" style="margin-left:8px;font-size:12px;color:#1b9e8f;font-weight:500">
                   已选择 {{ summaryForm.summaryImages.length + summaryForm.imageFiles.length }} 张
                 </span>
               </div>
               <p style="font-size:12px;color:#6b7280;margin-top:4px">支持 jpg、png、gif 等格式，可多选</p>
               <div v-if="summaryForm.summaryImages.length > 0 || summaryForm.imageFiles.length > 0" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
                 <div v-for="(img, idx) in summaryForm.summaryImages" :key="'old-'+idx" style="position:relative;width:100px;height:100px">
-                  <img :src="img" style="width:100%;height:100%;object-fit:cover;border-radius:4px;border:2px solid #e5e7eb" alt="已上传图片" />
+                  <img :src="img" style="width:100%;height:100%;object-fit:cover;border-radius:4px;border:2px solid #e8ddd6" alt="已上传图片" />
                   <button type="button" @click="removeImage(idx)" style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:#ef4444;color:#fff;border:none;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center" title="删除">×</button>
                 </div>
                 <div v-for="(file, idx) in summaryForm.imageFiles" :key="'new-'+idx" style="position:relative;width:100px;height:100px">
-                  <img :src="getImagePreviewUrl(file)" style="width:100%;height:100%;object-fit:cover;border-radius:4px;border:2px solid #10b981" alt="待上传图片" />
+                  <img :src="getImagePreviewUrl(file)" style="width:100%;height:100%;object-fit:cover;border-radius:4px;border:2px solid #1b9e8f" alt="待上传图片" />
                   <button type="button" @click="removeImage(summaryForm.summaryImages.length + idx)" style="position:absolute;top:2px;right:2px;width:20px;height:20px;border-radius:50%;background:#ef4444;color:#fff;border:none;cursor:pointer;font-size:12px;line-height:1;display:flex;align-items:center;justify-content:center" title="删除">×</button>
                 </div>
               </div>
@@ -2440,8 +2732,8 @@ onMounted(() => {
               <span class="detail-label">附件</span>
               <input type="file" accept=".pdf,.doc,.docx" @change="e => summaryForm.attachmentFile = e.target.files?.[0] || null" />
               <p style="font-size:12px;color:#6b7280;margin-top:4px">支持 pdf、doc、docx 格式</p>
-              <p v-if="summaryForm.attachmentUrl && !summaryForm.attachmentFile" style="font-size:12px;color:#0f766e;margin-top:4px">
-                已有附件：<a :href="summaryForm.attachmentUrl" target="_blank" style="text-decoration:underline">查看</a>
+              <p v-if="summaryForm.attachmentUrl && !summaryForm.attachmentFile" style="font-size:12px;color:#1b9e8f;margin-top:4px">
+                已有附件：<a style="cursor:pointer;color:#1b9e8f;text-decoration:underline" @click="openPreview(summaryForm.attachmentUrl)">预览</a>
               </p>
             </div>
           </template>
@@ -2454,6 +2746,22 @@ onMounted(() => {
             <button type="button" class="btn" :disabled="summarySubmitting" @click="handleSubmitSummary">{{ summarySubmitting ? '提交中...' : '提交' }}</button>
           </template>
           <button type="button" class="btn ghost" @click="eventSummaryDialog.visible = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 二维码签到弹窗 -->
+    <div v-if="qrDialog.visible" class="modal-overlay" @click.self="qrDialog.visible = false">
+      <div class="modal-box" style="width:320px;text-align:center">
+        <div class="modal-head">
+          <h3>扫码签到</h3>
+          <button type="button" class="modal-close" @click="qrDialog.visible = false">×</button>
+        </div>
+        <div class="modal-content" style="padding:20px">
+          <p style="color:#6b7280;font-size:13px;margin:0 0 12px">{{ qrDialog.title }}</p>
+          <canvas ref="qrCanvasRef" style="border-radius:8px"></canvas>
+          <p style="margin:12px 0 0;font-size:13px;color:#374151">签到码：<strong>{{ qrDialog.code }}</strong></p>
+          <p style="margin:6px 0 0;font-size:12px;color:#9ca3af">学生扫码后自动完成签到</p>
         </div>
       </div>
     </div>
@@ -2477,22 +2785,43 @@ onMounted(() => {
       </div>
     </div>
   </div>
+
+  <!-- 文件在线预览弹窗 -->
+  <div v-if="previewDialog.visible" class="modal-overlay" @click.self="previewDialog.visible = false">
+    <div class="modal-box" style="width:min(900px,95%);height:85vh;display:flex;flex-direction:column">
+      <div class="modal-head">
+        <h3>文件预览</h3>
+        <div style="display:flex;gap:8px;align-items:center">
+          <a :href="previewDialog.url" target="_blank" style="font-size:13px;color:#e0583a;text-decoration:none">下载</a>
+          <button type="button" class="modal-close" @click="previewDialog.visible = false">×</button>
+        </div>
+      </div>
+      <iframe v-if="previewDialog.type === 'pdf'" :src="previewDialog.url" style="width:100%;flex:1;border:none" />
+      <iframe v-else-if="previewDialog.type === 'office'" :src="'https://view.officeapps.live.com/op/embed.aspx?src=' + encodeURIComponent(previewDialog.url)" style="width:100%;flex:1;border:none" />
+      <div v-else-if="previewDialog.type === 'image'" style="flex:1;overflow:auto;display:flex;justify-content:center;align-items:center;padding:16px;background:#f6efe9">
+        <img :src="previewDialog.url" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:8px" />
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
 .admin-page {
-  --bg-top: #ecfdf5;
-  --bg-bottom: #f8fafc;
+  --bg-top: #fdfaf8;
+  --bg-bottom: #f6efe9;
   --panel: #ffffff;
-  --line: #d6e2db;
-  --text-main: #0f2f2b;
-  --text-sub: #41615b;
-  --brand: #0f766e;
+  --line: #e8ddd6;
+  --text-main: #2c1e16;
+  --text-sub: #7a6b62;
+  --brand: #1b9e8f;
   --danger: #b91c1c;
+  --font-display: "LXGW WenKai", "Songti SC", "Noto Serif SC", serif;
+  --font-body: "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
 
   min-height: 100vh;
   background: linear-gradient(170deg, var(--bg-top), var(--bg-bottom));
   padding: 18px;
+  font-family: var(--font-body);
 }
 
 .layout-shell {
@@ -2504,7 +2833,7 @@ onMounted(() => {
 }
 
 .left-menu {
-  border: 1px solid #d5e8df;
+  border: 1px solid #e8ddd6;
   border-radius: 16px;
   background: #ffffff;
   padding: 20px 12px;
@@ -2519,7 +2848,7 @@ onMounted(() => {
 
 .menu-brand {
   padding: 0 8px 12px;
-  border-bottom: 1px solid #ecfdf5;
+  border-bottom: 1px solid rgba(27, 158, 143, 0.06);
   margin-bottom: 6px;
 }
 
@@ -2527,13 +2856,14 @@ onMounted(() => {
   margin: 0;
   font-size: 18px;
   font-weight: 700;
-  color: #0f172a;
+  color: #2c1e16;
+  font-family: var(--font-display);
 }
 
 .menu-sub {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #64748b;
+  color: #7a6b62;
 }
 
 .menu-item {
@@ -2543,7 +2873,7 @@ onMounted(() => {
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #334155;
+  color: #5a4e48;
   cursor: pointer;
   padding: 0 12px;
   font-size: 14px;
@@ -2558,7 +2888,7 @@ onMounted(() => {
 
 .menu-item.active {
   background: #e9fbee;
-  color: #0f766e;
+  color: #1b9e8f;
   font-weight: 600;
 }
 
@@ -2585,7 +2915,7 @@ onMounted(() => {
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #334155;
+  color: #5a4e48;
   cursor: pointer;
   padding: 0 12px;
   font-size: 14px;
@@ -2598,12 +2928,12 @@ onMounted(() => {
 }
 
 .menu-group-btn.group-active {
-  color: #0f766e;
+  color: #1b9e8f;
 }
 
 .menu-arrow {
   font-size: 11px;
-  color: #94a3b8;
+  color: #b5a89f;
 }
 
 .submenu {
@@ -2620,7 +2950,7 @@ onMounted(() => {
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: #475569;
+  color: #7a6b62;
   cursor: pointer;
   text-align: left;
   padding: 0 10px;
@@ -2631,13 +2961,23 @@ onMounted(() => {
 
 .submenu-item:hover {
   background: #f0fdf8;
-  color: #334155;
+  color: #5a4e48;
 }
 
 .submenu-item.active {
   background: #e9fbee;
-  color: #0f766e;
+  color: #1b9e8f;
   font-weight: 600;
+}
+
+.pending-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #ef4444;
+  border-radius: 50%;
+  margin-left: 6px;
+  flex-shrink: 0;
 }
 
 .menu-divider {
@@ -2647,7 +2987,7 @@ onMounted(() => {
 }
 
 .menu-item.ghost {
-  color: #64748b;
+  color: #7a6b62;
   font-size: 13px;
 }
 
@@ -2677,6 +3017,7 @@ onMounted(() => {
   margin: 6px 0 0;
   font-size: 30px;
   color: var(--text-main);
+  font-family: var(--font-display);
 }
 
 .sub {
@@ -2738,8 +3079,8 @@ select {
 }
 
 .readonly-field {
-  background: #f8fafc;
-  color: #475569;
+  background: #fdfaf8;
+  color: #7a6b62;
   cursor: not-allowed;
 }
 
@@ -2793,39 +3134,66 @@ select {
 .org-tree {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .org-tree-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
+  padding: 8px 10px;
   border-radius: 8px;
   transition: background 0.12s;
+  position: relative;
 }
 
 .org-tree-row:hover {
-  background: #f8fafc;
+  background: #fdfaf8;
 }
 
 .org-tree-row--root {
-  background: #f1f5f9;
+  background: #f6efe9;
   border-radius: 10px;
-  padding: 8px 12px;
+  padding-right: 12px;
 }
 
 .org-tree-row--root:hover {
-  background: #e9f0f7;
+  background: #f0e8e0;
 }
 
-.org-tree-prefix {
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 13px;
-  color: #94a3b8;
-  white-space: pre;
-  letter-spacing: 0;
+.tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #b5a89f;
+  cursor: pointer;
   flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+  user-select: none;
+}
+
+.tree-toggle:hover {
+  background: #e8ddd6;
+  color: #7a6b62;
+}
+
+.tree-toggle--leaf {
+  width: 20px;
+  cursor: default;
+  position: relative;
+}
+
+.tree-toggle--leaf::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e8ddd6;
+  position: absolute;
 }
 
 .org-tree-name {
@@ -2846,13 +3214,13 @@ select {
 }
 
 .org-level-badge.level-1 {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: rgba(224, 88, 58, 0.1);
+  color: #e0583a;
 }
 
 .org-level-badge.level-2 {
-  background: #d1fae5;
-  color: #065f46;
+  background: rgba(27, 158, 143, 0.08);
+  color: #167f73;
 }
 
 .org-level-badge.level-3 {
@@ -2900,13 +3268,13 @@ select {
 }
 
 .cancel-status-tag.pending {
-  color: #334155;
-  background: #e2e8f0;
+  color: #5a4e48;
+  background: #e8ddd6;
 }
 
 .cancel-status-tag.done {
   color: #166534;
-  background: #dcfce7;
+  background: rgba(27, 158, 143, 0.06);
 }
 
 .cancel-status-tag.rejected {
@@ -2916,7 +3284,7 @@ select {
 
 .empty-text {
   font-size: 13px;
-  color: #64748b;
+  color: #7a6b62;
 }
 
 .action-row {
@@ -2963,7 +3331,7 @@ select {
   background: #f0fdfa;
   border-radius: 10px;
   padding: 10px 12px;
-  color: #0f766e;
+  color: #1b9e8f;
   font-size: 14px;
 }
 
@@ -2974,7 +3342,7 @@ select {
   flex-wrap: wrap;
   margin-bottom: 12px;
   padding: 10px 12px;
-  background: #f8fafc;
+  background: #fdfaf8;
   border: 1px solid var(--line);
   border-radius: 10px;
 }
@@ -3001,13 +3369,13 @@ select {
 
 .filter-result-tip {
   font-size: 12px;
-  color: #64748b;
+  color: #7a6b62;
   white-space: nowrap;
 }
 
 .member-count {
   font-size: 13px;
-  color: #64748b;
+  color: #7a6b62;
 }
 
 .member-count strong {
@@ -3027,7 +3395,7 @@ select {
 }
 
 .member-table thead tr {
-  background: #f8fafc;
+  background: #fdfaf8;
   border-bottom: 1px solid var(--line);
 }
 
@@ -3036,7 +3404,7 @@ select {
   text-align: left;
   font-size: 12px;
   font-weight: 600;
-  color: #64748b;
+  color: #7a6b62;
   white-space: nowrap;
 }
 
@@ -3047,7 +3415,7 @@ select {
 
 .member-table td {
   padding: 10px 14px;
-  border-bottom: 1px solid #f1f5f9;
+  border-bottom: 1px solid #f6efe9;
   vertical-align: middle;
 }
 
@@ -3056,24 +3424,24 @@ select {
 }
 
 .member-table tbody tr:hover {
-  background: #f8fbff;
+  background: #fdfaf8;
 }
 
 .td-seq {
   text-align: center;
-  color: #94a3b8;
+  color: #b5a89f;
   font-size: 12px;
   width: 40px;
 }
 
 .td-secondary {
-  color: #64748b;
+  color: #7a6b62;
   font-size: 13px;
 }
 
 .td-empty {
   text-align: center;
-  color: #94a3b8;
+  color: #b5a89f;
   padding: 32px !important;
   font-size: 13px;
 }
@@ -3094,7 +3462,7 @@ select {
 
 .member-username {
   font-size: 12px;
-  color: #94a3b8;
+  color: #b5a89f;
   line-height: 1.3;
 }
 
@@ -3110,18 +3478,18 @@ select {
 }
 
 .pos-level-0 {
-  background: #f1f5f9;
-  color: #64748b;
+  background: #f6efe9;
+  color: #7a6b62;
 }
 
 .pos-level-1 {
   background: #dbeafe;
-  color: #1d4ed8;
+  color: #e0583a;
 }
 
 .pos-level-2 {
-  background: #d1fae5;
-  color: #065f46;
+  background: rgba(27, 158, 143, 0.08);
+  color: #167f73;
 }
 
 .pos-level-3 {
@@ -3170,6 +3538,36 @@ select {
   }
 }
 
+/* 入社申请状态筛选 */
+.join-apply-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid #e8ddd6;
+  padding-bottom: 10px;
+}
+
+.join-apply-tab {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #7a6b62;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.join-apply-tab:hover {
+  background: #f6efe9;
+}
+
+.join-apply-tab.active {
+  background: rgba(27, 158, 143, 0.1);
+  color: #1b9e8f;
+  font-weight: 600;
+}
+
 /* 入社申请列表表格 */
 .apply-table {
   width: 100%;
@@ -3186,13 +3584,13 @@ select {
 
 .apply-table th {
   font-weight: 600;
-  color: #64748b;
-  background: #f8fafc;
+  color: #7a6b62;
+  background: #fdfaf8;
   font-size: 13px;
 }
 
 .apply-table tbody tr:hover {
-  background: #f8fafc;
+  background: #fdfaf8;
 }
 
 .apply-table-actions {
@@ -3241,7 +3639,7 @@ select {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
-  color: #0f172a;
+  color: #2c1e16;
 }
 
 .modal-close {
@@ -3249,8 +3647,8 @@ select {
   height: 28px;
   border: none;
   border-radius: 6px;
-  background: #f1f5f9;
-  color: #64748b;
+  background: #f6efe9;
+  color: #7a6b62;
   cursor: pointer;
   font-size: 18px;
   line-height: 1;
@@ -3261,7 +3659,7 @@ select {
 }
 
 .modal-close:hover {
-  background: #e2e8f0;
+  background: #e8ddd6;
 }
 
 .modal-content {
@@ -3294,14 +3692,14 @@ select {
 
 .detail-label {
   font-weight: 500;
-  color: #64748b;
+  color: #7a6b62;
   min-width: 72px;
   flex-shrink: 0;
 }
 
 .detail-text {
   margin: 0;
-  color: #334155;
+  color: #5a4e48;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
@@ -3313,13 +3711,13 @@ select {
   border-radius: 8px;
   padding: 8px 12px;
   font-size: 14px;
-  color: #0f172a;
+  color: #2c1e16;
   box-sizing: border-box;
   font-family: inherit;
 }
 .form-input:focus {
   outline: none;
-  border-color: #10b981;
+  border-color: #1b9e8f;
 }
 
 .form-error {
@@ -3340,26 +3738,26 @@ select {
   padding: 20px 24px;
   border: 1px solid #99f6e4;
   border-radius: 12px;
-  background: linear-gradient(135deg, #ecfdf5, #f0fdfa);
+  background: linear-gradient(135deg, rgba(27, 158, 143, 0.06), #f0fdfa);
 }
 
 .balance-label {
   font-size: 13px;
-  color: #64748b;
+  color: #7a6b62;
   font-weight: 500;
 }
 
 .balance-value {
   font-size: 28px;
   font-weight: 700;
-  color: #0f766e;
+  color: #1b9e8f;
 }
 
 .finance-form-card {
   border: 1px solid var(--line);
   border-radius: 12px;
   padding: 16px;
-  background: #f8fafc;
+  background: #fdfaf8;
 }
 
 .amount-hint {
@@ -3368,7 +3766,7 @@ select {
 }
 
 .amount-hint.hint-ok {
-  color: #059669;
+  color: #1b9e8f;
 }
 
 .amount-hint.hint-warn {
@@ -3386,7 +3784,7 @@ select {
 
 .pagination-info {
   font-size: 13px;
-  color: #64748b;
+  color: #7a6b62;
 }
 
 .modal-mask {
@@ -3432,8 +3830,8 @@ select {
   border-radius: 8px;
   font-size: 14px;
   font-weight: 600;
-  color: #059669;
-  background: #ecfdf5;
+  color: #1b9e8f;
+  background: rgba(27, 158, 143, 0.06);
 }
 
 .available-balance-hint.warn {

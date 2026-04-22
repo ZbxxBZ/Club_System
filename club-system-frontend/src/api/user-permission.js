@@ -113,3 +113,15 @@ export const getAnomalyExpensesApi = (params) => http.get('/school-admin/anomaly
 export const getClubStatisticsApi = (params) => http.get('/school-admin/statistics/clubs', { params })
 export const getEventStatisticsApi = (params) => http.get('/school-admin/statistics/events', { params })
 export const getFinanceStatisticsApi = (params) => http.get('/school-admin/statistics/finance', { params })
+
+// Club Admin - Review (年审)
+export const getMyCurrentReviewApi = () => http.get('/club-admin/me/review')
+export const submitMyReviewApi = (payload) => http.post('/club-admin/me/review', payload)
+export const getMyReviewsApi = (params) => http.get('/club-admin/me/reviews', { params })
+
+// School Admin - Review (年审)
+export const getReviewWindowStatusApi = () => http.get('/school-admin/config/review-open')
+export const updateReviewWindowApi = (payload) => http.put('/school-admin/config/review-open', payload)
+export const getReviewsForApprovalApi = (params) => http.get('/school-admin/approvals/reviews', { params })
+export const getReviewDetailApi = (reviewId) => http.get(`/school-admin/approvals/reviews/${reviewId}`)
+export const decideReviewApi = (reviewId, payload) => http.post(`/school-admin/approvals/reviews/${reviewId}/decision`, payload)

@@ -1,6 +1,7 @@
 package com.bistu.clubsystembackend.controller;
 
 import com.bistu.clubsystembackend.entity.request.EventApprovalDecisionRequest;
+import com.bistu.clubsystembackend.entity.request.ReviewDecisionRequest;
 import com.bistu.clubsystembackend.entity.request.ExpenseApprovalDecisionRequest;
 import com.bistu.clubsystembackend.entity.request.ApprovalDecisionRequest;
 import com.bistu.clubsystembackend.entity.request.ApprovalStatusUpdateRequest;
@@ -18,6 +19,8 @@ import com.bistu.clubsystembackend.entity.response.EventSummaryData;
 import com.bistu.clubsystembackend.entity.response.ApprovalStatusUpdateData;
 import com.bistu.clubsystembackend.entity.response.ClubApprovalDetailData;
 import com.bistu.clubsystembackend.entity.response.ClubApprovalItem;
+import com.bistu.clubsystembackend.entity.response.ClubReviewDetailData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewItem;
 import com.bistu.clubsystembackend.entity.response.ClubCancelApplyItem;
 import com.bistu.clubsystembackend.entity.response.ClubCancelDetailData;
 import com.bistu.clubsystembackend.entity.response.ClubCancelStatusUpdateData;
@@ -80,8 +83,9 @@ public class SchoolAdminController {
             @RequestParam(defaultValue = "10") int pageSize,
             @RequestParam(required = false) String roleCode,
             @RequestParam(required = false) String status,
-            @RequestParam(required = false) String keyword) {
-        return ApiResponse.success(userPermissionService.listUsers(pageNum, pageSize, roleCode, status, keyword));
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) Long clubId) {
+        return ApiResponse.success(userPermissionService.listUsers(pageNum, pageSize, roleCode, status, keyword, clubId));
     }
 
     @PatchMapping("/users/{userId}/status")
@@ -333,5 +337,57 @@ public class SchoolAdminController {
     public ApiResponse<Void> updateClubApprovalStages(@RequestBody java.util.Map<String, String> body) {
         userPermissionService.updateClubApprovalStages(body.get("stages"));
         return ApiResponse.success("配置已更新", null);
+    }
+
+    // ===== Club Review (年审) =====
+
+    @GetMapping("/config/review-open")
+    public ApiResponse<java.util.Map<String, String>> getReviewWindowStatus() {
+        return ApiResponse.success(userPermissionService.getReviewWindowStatus());
+    }
+
+    @PutMapping("/config/review-open")
+    public ApiResponse<Void> openReviewWindow(@RequestBody java.util.Map<String, Object> body) {
+        String action = body.get("action") == null ? "" : String.valueOf(body.get("action"));
+        if ("close".equals(action)) {
+            userPermissionService.closeReviewWindow();
+        } else {
+            Object yearObj = body.get("year");
+            int year;
+            if (yearObj instanceof Number) {
+                year = ((Number) yearObj).intValue();
+            } else if (yearObj != null && !yearObj.toString().trim().isEmpty()) {
+                try {
+                    year = Integer.parseInt(yearObj.toString().trim());
+                } catch (NumberFormatException ex) {
+                    year = java.time.Year.now().getValue();
+                }
+            } else {
+                year = java.time.Year.now().getValue();
+            }
+            userPermissionService.openReviewWindow(year);
+        }
+        return ApiResponse.success("操作成功", null);
+    }
+
+    @GetMapping("/approvals/reviews")
+    public ApiResponse<PageResponseData<ClubReviewItem>> listReviewsForApproval(
+            @RequestParam(defaultValue = "1") int pageNum,
+            @RequestParam(defaultValue = "20") int pageSize,
+            @RequestParam(required = false) Integer reviewStatus,
+            @RequestParam(required = false) String keyword) {
+        return ApiResponse.success(userPermissionService.listReviewsForApproval(pageNum, pageSize, reviewStatus, keyword));
+    }
+
+    @GetMapping("/approvals/reviews/{reviewId}")
+    public ApiResponse<ClubReviewDetailData> getReviewDetail(@PathVariable Long reviewId) {
+        return ApiResponse.success(userPermissionService.getReviewDetail(reviewId));
+    }
+
+    @PostMapping("/approvals/reviews/{reviewId}/decision")
+    public ApiResponse<Void> decisionReview(@PathVariable Long reviewId,
+                                             @Valid @RequestBody ReviewDecisionRequest request) {
+        userPermissionService.decisionReview(reviewId, request);
+        return ApiResponse.success("操作成功", null);
     }
 }

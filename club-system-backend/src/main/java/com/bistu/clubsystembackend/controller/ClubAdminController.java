@@ -5,6 +5,7 @@ import com.bistu.clubsystembackend.entity.request.CreateEventRequest;
 import com.bistu.clubsystembackend.entity.request.CreateIncomeRequest;
 import com.bistu.clubsystembackend.entity.request.EventCheckinRequest;
 import com.bistu.clubsystembackend.entity.request.SubmitEventSummaryRequest;
+import com.bistu.clubsystembackend.entity.request.SubmitClubReviewRequest;
 import com.bistu.clubsystembackend.entity.request.AddClubMemberRequest;
 import com.bistu.clubsystembackend.entity.request.ClubCancelSubmitRequest;
 import com.bistu.clubsystembackend.entity.request.CreateClubPositionRequest;
@@ -25,6 +26,8 @@ import com.bistu.clubsystembackend.entity.response.ClubInfoData;
 import com.bistu.clubsystembackend.entity.response.ClubMemberItem;
 import com.bistu.clubsystembackend.entity.response.ClubPositionItem;
 import com.bistu.clubsystembackend.entity.response.ClubRecruitConfigData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewDetailData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewItem;
 import com.bistu.clubsystembackend.entity.response.ExpenseDetailData;
 import com.bistu.clubsystembackend.entity.response.FinanceRecordItem;
 import com.bistu.clubsystembackend.entity.response.IncomeDetailData;
@@ -277,5 +280,25 @@ public class ClubAdminController {
     @GetMapping("/balance")
     public ApiResponse<ClubBalanceData> getBalance() {
         return ApiResponse.success(userPermissionService.getMyBalance());
+    }
+
+    // ===== Club Review (年审) =====
+
+    @GetMapping("/review")
+    public ApiResponse<ClubReviewDetailData> getMyCurrentReview() {
+        return ApiResponse.success(userPermissionService.getMyCurrentReview());
+    }
+
+    @PostMapping("/review")
+    public ApiResponse<Void> submitMyReview(@Valid @RequestBody SubmitClubReviewRequest request) {
+        userPermissionService.submitMyReview(request);
+        return ApiResponse.success("年审报告提交成功", null);
+    }
+
+    @GetMapping("/reviews")
+    public ApiResponse<PageResponseData<ClubReviewItem>> listMyReviews(
+            @RequestParam(defaultValue = "1") int pageNum,
+            @RequestParam(defaultValue = "10") int pageSize) {
+        return ApiResponse.success(userPermissionService.listMyReviews(pageNum, pageSize));
     }
 }

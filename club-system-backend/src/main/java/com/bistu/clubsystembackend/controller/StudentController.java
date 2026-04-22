@@ -113,7 +113,7 @@ public class StudentController {
     @PostMapping("/events/{eventId}/signup")
     public ApiResponse<Void> signupEvent(@PathVariable Long eventId) {
         userPermissionService.signupEvent(eventId);
-        return ApiResponse.success("signup success", null);
+        return ApiResponse.success("报名成功", null);
     }
 
     @GetMapping("/events/{eventId}")

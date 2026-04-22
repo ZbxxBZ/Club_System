@@ -7,6 +7,7 @@ import ClubAdminDashboardView from '../views/dashboard/club-admin/ClubAdminDashb
 import SchoolAdminDashboardView from '../views/dashboard/school-admin/SchoolAdminDashboardView.vue'
 import UnauthorizedView from '../views/common/UnauthorizedView.vue'
 import AccountDisabledView from '../views/common/AccountDisabledView.vue'
+import CheckinView from '../views/checkin/CheckinView.vue'
 import { useAuthStore } from '../stores/auth'
 import { getDefaultDashboardPath, hasRolePermission, PERMISSIONS } from '../utils/role'
 
@@ -81,6 +82,12 @@ const router = createRouter({
       path: '/account-disabled',
       name: 'accountDisabled',
       component: AccountDisabledView,
+      meta: { public: true },
+    },
+    {
+      path: '/checkin',
+      name: 'checkin',
+      component: CheckinView,
       meta: { public: true },
     },
   ],

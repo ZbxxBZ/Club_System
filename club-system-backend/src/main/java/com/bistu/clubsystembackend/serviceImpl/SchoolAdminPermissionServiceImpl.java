@@ -2,6 +2,7 @@ package com.bistu.clubsystembackend.serviceImpl;
 
 import com.bistu.clubsystembackend.entity.request.EventApprovalDecisionRequest;
 import com.bistu.clubsystembackend.entity.request.ExpenseApprovalDecisionRequest;
+import com.bistu.clubsystembackend.entity.request.ReviewDecisionRequest;
 import com.bistu.clubsystembackend.entity.request.ApprovalDecisionRequest;
 import com.bistu.clubsystembackend.entity.request.ApprovalStatusUpdateRequest;
 import com.bistu.clubsystembackend.entity.request.ClubCancelStatusUpdateRequest;
@@ -18,6 +19,8 @@ import com.bistu.clubsystembackend.entity.response.EventSummaryData;
 import com.bistu.clubsystembackend.entity.response.ApprovalStatusUpdateData;
 import com.bistu.clubsystembackend.entity.response.ClubApprovalDetailData;
 import com.bistu.clubsystembackend.entity.response.ClubApprovalItem;
+import com.bistu.clubsystembackend.entity.response.ClubReviewDetailData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewItem;
 import com.bistu.clubsystembackend.entity.response.ClubCancelApplyData;
 import com.bistu.clubsystembackend.entity.response.ClubCancelApplyItem;
 import com.bistu.clubsystembackend.entity.response.ClubCancelDetailData;
@@ -82,15 +85,15 @@ public class SchoolAdminPermissionServiceImpl implements SchoolAdminPermissionSe
         this.cacheService = cacheService;
     }
 
-    public PageResponseData<SchoolUserItem> listUsers(int pageNum, int pageSize, String roleCode, String status, String keyword) {
+    public PageResponseData<SchoolUserItem> listUsers(int pageNum, int pageSize, String roleCode, String status, String keyword, Long clubId) {
         AccessChecker.requireRole(RoleCode.SCHOOL_ADMIN);
         int safePageNum = Math.max(1, pageNum);
         int safePageSize = Math.max(1, Math.min(pageSize, 100));
         int offset = (safePageNum - 1) * safePageSize;
         Integer dbStatus = UserStatusUtil.toDbStatus(status);
         Boolean graduated = "GRADUATED".equals(status) ? Boolean.TRUE : null;
-        List<SchoolUserItem> records = mapper.listUsers(roleCode, keyword, dbStatus, graduated, offset, safePageSize);
-        long total = mapper.countUsers(roleCode, keyword, dbStatus, graduated);
+        List<SchoolUserItem> records = mapper.listUsers(roleCode, keyword, dbStatus, graduated, clubId, offset, safePageSize);
+        long total = mapper.countUsers(roleCode, keyword, dbStatus, graduated, clubId);
         return new PageResponseData<>(records, total, safePageNum, safePageSize);
     }
 
@@ -363,7 +366,9 @@ public class SchoolAdminPermissionServiceImpl implements SchoolAdminPermissionSe
                 mapper.countActiveUsers(),
                 mapper.countTotalUsers(),
                 mapper.countPendingApprovals(),
-                mapper.countSuspiciousExpenses()
+                mapper.countSuspiciousExpenses(),
+                mapper.countMonthEvents(),
+                mapper.countRegisteredMembers()
         );
     }
 
@@ -979,5 +984,122 @@ public class SchoolAdminPermissionServiceImpl implements SchoolAdminPermissionSe
             throw new BusinessException(BizCode.PARAM_INVALID.getCode(), "审批阶段JSON格式不正确");
         }
         cacheService.setConfig("config:approval:club-stages", stagesJson);
+    }
+
+    // ===== Club Review (年审) =====
+
+    @Override
+    public Map<String, String> getReviewWindowStatus() {
+        AccessChecker.requireRole(RoleCode.SCHOOL_ADMIN);
+        Integer year = mapper.findLatestReviewYear();
+        boolean open = false;
+        if (year != null) {
+            open = mapper.countPendingReviewsByYear(year) > 0;
+        }
+        return Map.of("open", String.valueOf(open),
+                       "year", year != null ? String.valueOf(year) : "");
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void openReviewWindow(int year) {
+        CurrentUser user = AccessChecker.requireRole(RoleCode.SCHOOL_ADMIN);
+        List<Long> clubIds = mapper.listActiveClubIds();
+        LocalDateTime now = LocalDateTime.now();
+        for (Long clubId : clubIds) {
+            // 唯一键 uk_club_year(club_id, review_year) 不区分软删，不能盲目 insert
+            java.util.Map<String, Object> existing = mapper.findClubReviewRawRecord(clubId, year);
+            if (existing == null) {
+                // 从未创建过该社团该年度的年审记录 → 新建待提交
+                mapper.insertClubReview(idGenerator.nextId(), clubId, year, 1, user.getUserId(), now);
+            } else {
+                Object idObj = existing.get("id");
+                Object deletedObj = existing.get("isDeleted");
+                Long rawId = (idObj instanceof Number) ? ((Number) idObj).longValue() : Long.parseLong(String.valueOf(idObj));
+                // tinyint(1) 在 MySQL Connector/J 下可能被映射成 Boolean，这里兼容 Boolean 与 Number
+                boolean isDeleted;
+                if (deletedObj instanceof Boolean) {
+                    isDeleted = (Boolean) deletedObj;
+                } else if (deletedObj instanceof Number) {
+                    isDeleted = ((Number) deletedObj).intValue() == 1;
+                } else {
+                    isDeleted = "1".equals(String.valueOf(deletedObj));
+                }
+                // is_deleted=1 一定是之前关闭窗口时软删的 review_status=1（closeReviewWindow 只删待提交记录）
+                // → 还原即可，不清空任何内容
+                // is_deleted=0 的记录（状态 2 待审核 / 3 通过 / 4 驳回 / 5 整改）保留原状，已提交的不受影响
+                if (isDeleted) {
+                    mapper.undeleteClubReview(rawId, user.getUserId(), now);
+                }
+            }
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void closeReviewWindow() {
+        AccessChecker.requireRole(RoleCode.SCHOOL_ADMIN);
+        Integer year = mapper.findLatestReviewYear();
+        if (year != null) {
+            mapper.closeReviewWindow(year, LocalDateTime.now());
+        }
+    }
+
+    @Override
+    public PageResponseData<ClubReviewItem> listReviewsForApproval(int pageNum, int pageSize,
+                                                                     Integer reviewStatus, String keyword) {
+        AccessChecker.requireRole(RoleCode.SCHOOL_ADMIN);
+        int safePageNum = Math.max(1, pageNum);
+        int safePageSize = Math.max(1, Math.min(pageSize, 100));
+        int offset = (safePageNum - 1) * safePageSize;
+        String safeKeyword = (keyword == null || keyword.trim().isEmpty()) ? null : keyword.trim();
+        List<ClubReviewItem> records = mapper.listClubReviewsForApproval(reviewStatus, safeKeyword, offset, safePageSize);
+        long total = mapper.countClubReviewsForApproval(reviewStatus, safeKeyword);
+        return new PageResponseData<>(records, total, safePageNum, safePageSize);
+    }
+
+    @Override
+    public ClubReviewDetailData getReviewDetail(Long reviewId) {
+        AccessChecker.requireRole(RoleCode.SCHOOL_ADMIN);
+        ClubReviewDetailData review = mapper.findClubReviewById(reviewId);
+        if (review == null) {
+            throw new BusinessException(BizCode.RESOURCE_NOT_FOUND.getCode(), "年审记录不存在");
+        }
+        review.setIncomeList(mapper.listAllClubIncomesByYear(review.getClubId(), review.getReviewYear()));
+        review.setExpenseList(mapper.listAllClubExpensesByYear(review.getClubId(), review.getReviewYear()));
+        review.setMemberList(mapper.listAllClubMembers(review.getClubId()));
+        return review;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void decisionReview(Long reviewId, ReviewDecisionRequest request) {
+        CurrentUser user = AccessChecker.requireRole(RoleCode.SCHOOL_ADMIN);
+        ClubReviewDetailData review = mapper.findClubReviewById(reviewId);
+        if (review == null) {
+            throw new BusinessException(BizCode.RESOURCE_NOT_FOUND.getCode(), "年审记录不存在");
+        }
+        if (review.getReviewStatus() != 2) {
+            throw new BusinessException(BizCode.DATA_SCOPE_DENIED.getCode(), "该年审记录不在待审核状态");
+        }
+
+        String action = request.getAction().toUpperCase();
+        LocalDateTime now = LocalDateTime.now();
+        if ("APPROVE".equals(action)) {
+            mapper.updateClubReviewDecision(reviewId, 3, request.getScore(), null, user.getUserId(), now);
+            // 如果社团处于限期整改状态(3)，恢复为活跃(2)
+            Integer clubStatus = mapper.findClubStatusById(review.getClubId());
+            if (clubStatus != null && clubStatus == 3) {
+                mapper.updateClubStatus(review.getClubId(), 2, user.getUserId(), now);
+            }
+        } else if ("REJECT".equals(action)) {
+            mapper.updateClubReviewDecision(reviewId, 4, request.getScore(), request.getRejectReason(), user.getUserId(), now);
+            mapper.updateClubStatus(review.getClubId(), 3, user.getUserId(), now);
+        } else {
+            throw new BusinessException(BizCode.PARAM_INVALID.getCode(), "操作类型无效");
+        }
+        writeAudit("CLUB_REVIEW", reviewId, action, user,
+                String.valueOf(2), "APPROVE".equals(action) ? "3" : "4",
+                limitLength(request.getRejectReason(), 500));
     }
 }

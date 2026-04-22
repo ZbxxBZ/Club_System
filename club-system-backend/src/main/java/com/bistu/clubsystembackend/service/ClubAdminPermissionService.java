@@ -3,6 +3,7 @@ package com.bistu.clubsystembackend.service;
 import com.bistu.clubsystembackend.entity.request.CreateExpenseRequest;
 import com.bistu.clubsystembackend.entity.request.CreateEventRequest;
 import com.bistu.clubsystembackend.entity.request.CreateIncomeRequest;
+import com.bistu.clubsystembackend.entity.request.SubmitClubReviewRequest;
 import com.bistu.clubsystembackend.entity.request.EventCheckinRequest;
 import com.bistu.clubsystembackend.entity.request.SubmitEventSummaryRequest;
 import com.bistu.clubsystembackend.entity.request.AddClubMemberRequest;
@@ -25,6 +26,8 @@ import com.bistu.clubsystembackend.entity.response.ClubMemberItem;
 import com.bistu.clubsystembackend.entity.response.ClubPositionItem;
 import com.bistu.clubsystembackend.entity.response.ClubRecruitConfigData;
 import com.bistu.clubsystembackend.entity.response.ClubBalanceData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewDetailData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewItem;
 import com.bistu.clubsystembackend.entity.response.ExpenseDetailData;
 import com.bistu.clubsystembackend.entity.response.FinanceRecordItem;
 import com.bistu.clubsystembackend.entity.response.IncomeDetailData;
@@ -92,4 +95,9 @@ public interface ClubAdminPermissionService {
     PageResponseData<LedgerItem> listMyLedger(int pageNum, int pageSize, Integer bizType,
                                                LocalDateTime startTime, LocalDateTime endTime);
     ClubBalanceData getMyBalance();
+
+    // Club Review (年审)
+    ClubReviewDetailData getMyCurrentReview();
+    void submitMyReview(SubmitClubReviewRequest request);
+    PageResponseData<ClubReviewItem> listMyReviews(int pageNum, int pageSize);
 }

@@ -6,6 +6,7 @@ import com.bistu.clubsystembackend.entity.request.AddClubMemberRequest;
 import com.bistu.clubsystembackend.entity.request.CreateExpenseRequest;
 import com.bistu.clubsystembackend.entity.request.CreateEventRequest;
 import com.bistu.clubsystembackend.entity.request.CreateIncomeRequest;
+import com.bistu.clubsystembackend.entity.request.SubmitClubReviewRequest;
 import com.bistu.clubsystembackend.entity.request.EventCheckinRequest;
 import com.bistu.clubsystembackend.entity.request.SubmitEventSummaryRequest;
 import com.bistu.clubsystembackend.entity.request.ClubCancelSubmitRequest;
@@ -27,6 +28,8 @@ import com.bistu.clubsystembackend.entity.response.ClubInfoData;
 import com.bistu.clubsystembackend.entity.response.ClubMemberItem;
 import com.bistu.clubsystembackend.entity.response.ClubPositionItem;
 import com.bistu.clubsystembackend.entity.response.ClubRecruitConfigData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewDetailData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewItem;
 import com.bistu.clubsystembackend.entity.response.ExpenseDetailData;
 import com.bistu.clubsystembackend.entity.response.FinanceRecordItem;
 import com.bistu.clubsystembackend.entity.response.IncomeDetailData;
@@ -1122,6 +1125,94 @@ public class ClubAdminPermissionServiceImpl implements ClubAdminPermissionServic
             case 2: return "赞助收入";
             case 3: return "成员会费";
             default: return "其他";
+        }
+    }
+
+    // ===== Club Review (年审) =====
+
+    @Override
+    public ClubReviewDetailData getMyCurrentReview() {
+        CurrentUser user = AccessChecker.requireRole(RoleCode.CLUB_ADMIN);
+        Long clubId = resolveMyClubId(user);
+        // 查该社团最新的未完成年审记录
+        List<ClubReviewItem> list = mapper.listClubReviewsByClub(clubId, 0, 1);
+        if (list == null || list.isEmpty()) {
+            return null;
+        }
+        ClubReviewItem latest = list.get(0);
+        if (latest.getReviewStatus() != null && latest.getReviewStatus() == 3) {
+            return null; // 已通过，无进行中的年审
+        }
+        ClubReviewDetailData review = mapper.findClubReviewById(latest.getId());
+        if (review == null) {
+            return null;
+        }
+        populateReviewAggregation(review, review.getClubId(), review.getReviewYear());
+        // 窗口是否开放：该年份是否还有 status=1 的记录
+        boolean windowOpen = mapper.countPendingReviewsByYear(review.getReviewYear()) > 0;
+        review.setReviewWindowOpen(windowOpen);
+        return review;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void submitMyReview(SubmitClubReviewRequest request) {
+        CurrentUser user = AccessChecker.requireRole(RoleCode.CLUB_ADMIN);
+        Long clubId = resolveMyClubId(user);
+
+        // 查找当前可提交的年审记录
+        List<ClubReviewItem> list = mapper.listClubReviewsByClub(clubId, 0, 1);
+        ClubReviewDetailData review = null;
+        if (list != null && !list.isEmpty()) {
+            review = mapper.findClubReviewById(list.get(0).getId());
+        }
+        if (review == null) {
+            throw new BusinessException(BizCode.RESOURCE_NOT_FOUND.getCode(), "未找到年审记录");
+        }
+        if (review.getReviewStatus() != 1 && review.getReviewStatus() != 4) {
+            throw new BusinessException(BizCode.DATA_SCOPE_DENIED.getCode(), "当前状态不允许提交");
+        }
+        // 校验年审窗口是否开放（该年份存在 status=1 的记录）
+        if (review.getReviewStatus() == 1 && mapper.countPendingReviewsByYear(review.getReviewYear()) == 0) {
+            throw new BusinessException(BizCode.DATA_SCOPE_DENIED.getCode(), "年审窗口已关闭，无法提交");
+        }
+        int year = review.getReviewYear();
+
+        BigDecimal totalIncome = mapper.sumClubIncomeByYear(clubId, year);
+        BigDecimal totalExpense = mapper.sumClubExpenseByYear(clubId, year);
+        BigDecimal balance = mapper.findLatestClubBalance(clubId);
+        if (balance == null) balance = BigDecimal.ZERO;
+        int memberCount = (int) mapper.countClubMembers(clubId);
+        int eventCount = mapper.countClubEventsByYear(clubId, year);
+
+        mapper.updateClubReviewSubmit(review.getId(), request.getSummaryText(), request.getAttachmentUrl(),
+                2, totalIncome, totalExpense, balance, memberCount, eventCount,
+                user.getUserId(), LocalDateTime.now());
+    }
+
+    @Override
+    public PageResponseData<ClubReviewItem> listMyReviews(int pageNum, int pageSize) {
+        CurrentUser user = AccessChecker.requireRole(RoleCode.CLUB_ADMIN);
+        Long clubId = resolveMyClubId(user);
+        int safePageNum = Math.max(1, pageNum);
+        int safePageSize = Math.max(1, Math.min(pageSize, 100));
+        int offset = (safePageNum - 1) * safePageSize;
+        List<ClubReviewItem> records = mapper.listClubReviewsByClub(clubId, offset, safePageSize);
+        long total = mapper.countClubReviewsByClub(clubId);
+        return new PageResponseData<>(records, total, safePageNum, safePageSize);
+    }
+
+    private void populateReviewAggregation(ClubReviewDetailData review, Long clubId, int year) {
+        review.setIncomeList(mapper.listAllClubIncomesByYear(clubId, year));
+        review.setExpenseList(mapper.listAllClubExpensesByYear(clubId, year));
+        review.setMemberList(mapper.listAllClubMembers(clubId));
+        if (review.getReviewStatus() == 1 || review.getReviewStatus() == 4) {
+            review.setTotalIncome(mapper.sumClubIncomeByYear(clubId, year));
+            review.setTotalExpense(mapper.sumClubExpenseByYear(clubId, year));
+            BigDecimal bal = mapper.findLatestClubBalance(clubId);
+            review.setBalance(bal != null ? bal : BigDecimal.ZERO);
+            review.setMemberCount((int) mapper.countClubMembers(clubId));
+            review.setEventCount(mapper.countClubEventsByYear(clubId, year));
         }
     }
 }

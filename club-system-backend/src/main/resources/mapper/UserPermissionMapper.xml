@@ -1008,6 +1008,13 @@
                   AND r.role_code = #{roleCode}
             )
         </if>
+        <if test="clubId != null">
+            AND EXISTS (
+                SELECT 1 FROM `club_member` cm
+                WHERE cm.user_id = u.id AND cm.club_id = #{clubId}
+                  AND cm.is_deleted = 0 AND cm.member_status = 1
+            )
+        </if>
         ORDER BY u.id DESC
         LIMIT #{pageSize} OFFSET #{offset}
     </select>
@@ -1042,6 +1049,13 @@
                   AND r.status = 1
                   AND r.is_deleted = 0
                   AND r.role_code = #{roleCode}
+            )
+        </if>
+        <if test="clubId != null">
+            AND EXISTS (
+                SELECT 1 FROM `club_member` cm
+                WHERE cm.user_id = u.id AND cm.club_id = #{clubId}
+                  AND cm.is_deleted = 0 AND cm.member_status = 1
             )
         </if>
     </select>
@@ -1560,6 +1574,21 @@
           AND ((amount &gt; 500 AND approve_level = 1) OR invoice_url IS NULL OR invoice_url = '')
     </select>
 
+    <select id="countMonthEvents" resultType="long">
+        SELECT COUNT(1)
+        FROM `event`
+        WHERE is_deleted = 0
+          AND YEAR(start_at) = YEAR(CURDATE())
+          AND MONTH(start_at) = MONTH(CURDATE())
+    </select>
+
+    <select id="countRegisteredMembers" resultType="long">
+        SELECT COUNT(DISTINCT cm.user_id)
+        FROM `club_member` cm
+        WHERE cm.is_deleted = 0
+          AND cm.member_status = 1
+    </select>
+
     <insert id="insertAuditLog">
         INSERT INTO `audit_log` (
             id, biz_type, biz_id, op_type, op_user_id, op_user_role, op_at, ip, user_agent, before_json, after_json, remark
@@ -1683,6 +1712,13 @@
     <select id="findEventIdByCheckinCode" resultType="long">
         SELECT id FROM `event`
         WHERE checkin_code = #{checkinCode} AND is_deleted = 0
+        ORDER BY updated_at DESC
+        LIMIT 1
+    </select>
+
+    <select id="findEventIdByCheckinCodeAndEventId" resultType="long">
+        SELECT id FROM `event`
+        WHERE id = #{eventId} AND checkin_code = #{checkinCode} AND is_deleted = 0
         LIMIT 1
     </select>
 
@@ -2196,8 +2232,10 @@
     </select>
 
     <select id="countJoinedStudents" resultType="long">
-        SELECT COUNT(DISTINCT user_id) FROM `club_member`
-        WHERE is_deleted = 0 AND member_status = 1
+        SELECT COUNT(DISTINCT cm.user_id) FROM `club_member` cm
+        JOIN `user_role` ur ON ur.user_id = cm.user_id AND ur.is_deleted = 0 AND ur.status = 1
+        JOIN `role` r ON r.id = ur.role_id AND r.role_code = 'STUDENT'
+        WHERE cm.is_deleted = 0 AND cm.member_status = 1
     </select>
 
     <select id="listTopActiveClubs" resultType="com.bistu.clubsystembackend.entity.response.ClubStatisticsData$ActiveClub">
@@ -2313,5 +2351,160 @@
                             WHERE is_deleted = 0 AND expense_status IN (2,4) AND YEAR(created_at) = #{year} GROUP BY MONTH(created_at)) e ON e.month = m.month
         ORDER BY m.month
     </select>
+
+    <!-- ===== Club Review (年审) ===== -->
+
+    <insert id="insertClubReview">
+        INSERT INTO `club_review` (id, club_id, review_year, review_status, created_at, updated_at, created_by, updated_by, is_deleted)
+        VALUES (#{id}, #{clubId}, #{reviewYear}, #{reviewStatus}, #{now}, #{now}, #{createdBy}, #{createdBy}, 0)
+    </insert>
+
+    <select id="findClubReviewById" resultType="com.bistu.clubsystembackend.entity.response.ClubReviewDetailData">
+        SELECT cr.id, cr.club_id, c.club_name, cr.review_year, cr.review_status,
+               cr.summary_text, cr.attachment_url, cr.score, cr.reject_reason,
+               cr.total_income, cr.total_expense, cr.balance, cr.member_count, cr.event_count,
+               cr.created_at, cr.updated_at
+        FROM `club_review` cr
+                 JOIN `club` c ON c.id = cr.club_id
+        WHERE cr.id = #{reviewId} AND cr.is_deleted = 0
+    </select>
+
+    <select id="findClubReviewByClubAndYear" resultType="com.bistu.clubsystembackend.entity.response.ClubReviewDetailData">
+        SELECT cr.id, cr.club_id, c.club_name, cr.review_year, cr.review_status,
+               cr.summary_text, cr.attachment_url, cr.score, cr.reject_reason,
+               cr.total_income, cr.total_expense, cr.balance, cr.member_count, cr.event_count,
+               cr.created_at, cr.updated_at
+        FROM `club_review` cr
+                 JOIN `club` c ON c.id = cr.club_id
+        WHERE cr.club_id = #{clubId} AND cr.review_year = #{reviewYear} AND cr.is_deleted = 0
+    </select>
+
+    <update id="updateClubReviewSubmit">
+        UPDATE `club_review`
+        SET summary_text = #{summaryText}, attachment_url = #{attachmentUrl}, review_status = #{reviewStatus},
+            total_income = #{totalIncome}, total_expense = #{totalExpense}, balance = #{balance},
+            member_count = #{memberCount}, event_count = #{eventCount},
+            updated_by = #{updatedBy}, updated_at = #{now}
+        WHERE id = #{reviewId} AND is_deleted = 0
+    </update>
+
+    <update id="updateClubReviewDecision">
+        UPDATE `club_review`
+        SET review_status = #{reviewStatus}, score = #{score}, reject_reason = #{rejectReason},
+            reviewed_by = #{reviewedBy}, reviewed_at = #{now}, updated_at = #{now}
+        WHERE id = #{reviewId} AND is_deleted = 0
+    </update>
+
+    <select id="listClubReviewsByClub" resultType="com.bistu.clubsystembackend.entity.response.ClubReviewItem">
+        SELECT cr.id, cr.club_id, c.club_name, cr.review_year, cr.review_status,
+               cr.score, cr.reject_reason, cr.created_at, cr.updated_at
+        FROM `club_review` cr JOIN `club` c ON c.id = cr.club_id
+        WHERE cr.club_id = #{clubId} AND cr.is_deleted = 0
+        ORDER BY cr.review_year DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubReviewsByClub" resultType="long">
+        SELECT COUNT(1) FROM `club_review` WHERE club_id = #{clubId} AND is_deleted = 0
+    </select>
+
+    <select id="listClubReviewsForApproval" resultType="com.bistu.clubsystembackend.entity.response.ClubReviewItem">
+        SELECT cr.id, cr.club_id, c.club_name, cr.review_year, cr.review_status,
+               cr.score, cr.reject_reason, cr.created_at, cr.updated_at
+        FROM `club_review` cr JOIN `club` c ON c.id = cr.club_id
+        WHERE cr.is_deleted = 0
+        <if test="reviewStatus != null">
+            AND cr.review_status = #{reviewStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+        ORDER BY cr.updated_at DESC
+        LIMIT #{pageSize} OFFSET #{offset}
+    </select>
+
+    <select id="countClubReviewsForApproval" resultType="long">
+        SELECT COUNT(1)
+        FROM `club_review` cr JOIN `club` c ON c.id = cr.club_id
+        WHERE cr.is_deleted = 0
+        <if test="reviewStatus != null">
+            AND cr.review_status = #{reviewStatus}
+        </if>
+        <if test="keyword != null and keyword != ''">
+            AND c.club_name LIKE CONCAT('%', #{keyword}, '%')
+        </if>
+    </select>
+
+    <select id="listActiveClubIds" resultType="long">
+        SELECT id FROM `club` WHERE status = 2 AND is_deleted = 0
+    </select>
+
+    <select id="existsClubReview" resultType="int">
+        SELECT COUNT(1) FROM `club_review` WHERE club_id = #{clubId} AND review_year = #{reviewYear} AND is_deleted = 0
+    </select>
+
+    <select id="findClubReviewRawRecord" resultType="java.util.HashMap">
+        SELECT id, review_status AS reviewStatus, is_deleted AS isDeleted
+        FROM `club_review`
+        WHERE club_id = #{clubId} AND review_year = #{reviewYear}
+        LIMIT 1
+    </select>
+
+    <!-- 仅用于恢复此前被 closeReviewWindow 软删的"待提交"记录：
+         不清空已提交内容；仅把 is_deleted 还原为 0 -->
+    <update id="undeleteClubReview">
+        UPDATE `club_review`
+        SET is_deleted = 0, updated_by = #{updatedBy}, updated_at = #{now}
+        WHERE id = #{reviewId}
+    </update>
+
+    <select id="countClubEventsByYear" resultType="int">
+        SELECT COUNT(1) FROM `event`
+        WHERE club_id = #{clubId} AND YEAR(start_at) = #{year} AND is_deleted = 0
+    </select>
+
+    <select id="listAllClubIncomesByYear" resultType="com.bistu.clubsystembackend.entity.response.IncomeDetailData">
+        SELECT id, club_id, income_type,
+               CASE WHEN income_type = 1 THEN '学校拨款' WHEN income_type = 2 THEN '赞助' WHEN income_type = 3 THEN '会费' ELSE '其他' END AS income_type_name,
+               amount, occur_at, proof_url, source_desc, created_at
+        FROM `income`
+        WHERE club_id = #{clubId} AND YEAR(occur_at) = #{year} AND is_deleted = 0
+        ORDER BY occur_at DESC
+    </select>
+
+    <select id="listAllClubExpensesByYear" resultType="com.bistu.clubsystembackend.entity.response.ExpenseDetailData">
+        SELECT e.id, e.club_id, e.event_id, e.category, e.amount,
+               e.payee_name, e.payee_account, e.invoice_url, e.expense_desc,
+               e.approve_level, e.expense_status, e.reject_reason, e.created_at, e.updated_at
+        FROM `expense` e
+        WHERE e.club_id = #{clubId} AND e.expense_status = 2 AND YEAR(e.created_at) = #{year} AND e.is_deleted = 0
+        ORDER BY e.created_at DESC
+    </select>
+
+    <select id="listAllClubMembers" resultType="com.bistu.clubsystembackend.entity.response.ClubMemberItem">
+        SELECT cm.id, cm.club_id, cm.user_id, u.username, u.real_name,
+               cm.position_id, cp.position_name, cm.member_status,
+               cm.join_at, cm.quit_at, cm.contribution_score
+        FROM `club_member` cm
+                 JOIN `user` u ON u.id = cm.user_id
+                 LEFT JOIN `club_position` cp ON cp.id = cm.position_id AND cp.is_deleted = 0
+        WHERE cm.club_id = #{clubId} AND cm.member_status = 1 AND cm.is_deleted = 0
+        ORDER BY cm.join_at ASC
+    </select>
+
+    <select id="findLatestReviewYear" resultType="java.lang.Integer">
+        SELECT MAX(review_year) FROM `club_review` WHERE is_deleted = 0
+    </select>
+
+    <select id="countPendingReviewsByYear" resultType="int">
+        SELECT COUNT(1) FROM `club_review`
+        WHERE review_year = #{reviewYear} AND review_status = 1 AND is_deleted = 0
+    </select>
+
+    <update id="closeReviewWindow">
+        UPDATE `club_review`
+        SET is_deleted = 1, updated_at = #{now}
+        WHERE review_year = #{reviewYear} AND review_status = 1 AND is_deleted = 0
+    </update>
 
 </mapper>

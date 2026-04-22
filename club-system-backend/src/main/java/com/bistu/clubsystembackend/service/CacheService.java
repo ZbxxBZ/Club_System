@@ -176,8 +176,13 @@ public class CacheService {
     }
 
     public long incrementEventQuota(Long eventId) {
-        Long result = stringRedisTemplate.opsForValue().increment(EVENT_QUOTA_PREFIX + eventId);
-        return result != null ? result : 0;
+        try {
+            Long result = stringRedisTemplate.opsForValue().increment(EVENT_QUOTA_PREFIX + eventId);
+            return result != null ? result : 0;
+        } catch (Exception e) {
+            log.warn("Redis incrementEventQuota failed for event:{}", eventId, e);
+            return 0;
+        }
     }
 
     public Long getEventQuota(Long eventId) {

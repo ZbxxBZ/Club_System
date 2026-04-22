@@ -11,6 +11,7 @@ import com.bistu.clubsystembackend.entity.request.SchoolAdminUpdateClubRequest;
 import com.bistu.clubsystembackend.entity.request.UpdateClubStatusRequest;
 import com.bistu.clubsystembackend.entity.request.UpdateUserRoleRequest;
 import com.bistu.clubsystembackend.entity.request.UpdateUserStatusRequest;
+import com.bistu.clubsystembackend.entity.request.ReviewDecisionRequest;
 import com.bistu.clubsystembackend.entity.response.ApprovalStatusUpdateData;
 import com.bistu.clubsystembackend.entity.response.AnomalyExpenseItem;
 import com.bistu.clubsystembackend.entity.response.ClubStatisticsData;
@@ -21,6 +22,8 @@ import com.bistu.clubsystembackend.entity.response.EventDetailData;
 import com.bistu.clubsystembackend.entity.response.EventSummaryData;
 import com.bistu.clubsystembackend.entity.response.ClubApprovalDetailData;
 import com.bistu.clubsystembackend.entity.response.ClubApprovalItem;
+import com.bistu.clubsystembackend.entity.response.ClubReviewDetailData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewItem;
 import com.bistu.clubsystembackend.entity.response.ClubCancelApplyItem;
 import com.bistu.clubsystembackend.entity.response.ClubCancelDetailData;
 import com.bistu.clubsystembackend.entity.response.ClubCancelStatusUpdateData;
@@ -44,7 +47,7 @@ import java.util.Map;
 
 public interface SchoolAdminPermissionService {
 
-    PageResponseData<SchoolUserItem> listUsers(int pageNum, int pageSize, String roleCode, String status, String keyword);
+    PageResponseData<SchoolUserItem> listUsers(int pageNum, int pageSize, String roleCode, String status, String keyword, Long clubId);
 
     UserStatusChangeData updateUserStatus(Long userId, UpdateUserStatusRequest request);
 
@@ -114,4 +117,12 @@ public interface SchoolAdminPermissionService {
     void updateExpenseThreshold(String value);
     Map<String, Object> getClubApprovalStages();
     void updateClubApprovalStages(String stagesJson);
+
+    // Club Review (年审)
+    Map<String, String> getReviewWindowStatus();
+    void openReviewWindow(int year);
+    void closeReviewWindow();
+    PageResponseData<ClubReviewItem> listReviewsForApproval(int pageNum, int pageSize, Integer reviewStatus, String keyword);
+    ClubReviewDetailData getReviewDetail(Long reviewId);
+    void decisionReview(Long reviewId, ReviewDecisionRequest request);
 }

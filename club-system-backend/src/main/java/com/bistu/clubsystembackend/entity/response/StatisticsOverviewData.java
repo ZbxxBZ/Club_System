@@ -12,4 +12,6 @@ public class StatisticsOverviewData {
     private long totalUserCount;
     private long pendingApprovalCount;
     private long suspiciousExpenseCount;
+    private long monthEventCount;
+    private long registeredMemberCount;
 }

@@ -20,6 +20,8 @@ import com.bistu.clubsystembackend.entity.response.ClubInfoData;
 import com.bistu.clubsystembackend.entity.response.ClubMemberItem;
 import com.bistu.clubsystembackend.entity.response.ClubPositionItem;
 import com.bistu.clubsystembackend.entity.response.ClubPublicItem;
+import com.bistu.clubsystembackend.entity.response.ClubReviewDetailData;
+import com.bistu.clubsystembackend.entity.response.ClubReviewItem;
 import com.bistu.clubsystembackend.entity.response.ClubRecruitConfigData;
 import com.bistu.clubsystembackend.entity.response.ClubAdminEventItem;
 import com.bistu.clubsystembackend.entity.response.EventApprovalItem;
@@ -314,13 +316,15 @@ public interface UserPermissionMapper {
                                    @Param("keyword") String keyword,
                                    @Param("dbStatus") Integer dbStatus,
                                    @Param("graduated") Boolean graduated,
+                                   @Param("clubId") Long clubId,
                                    @Param("offset") int offset,
                                    @Param("pageSize") int pageSize);
 
     long countUsers(@Param("roleCode") String roleCode,
                     @Param("keyword") String keyword,
                     @Param("dbStatus") Integer dbStatus,
-                    @Param("graduated") Boolean graduated);
+                    @Param("graduated") Boolean graduated,
+                    @Param("clubId") Long clubId);
 
     Integer findUserStatusById(@Param("userId") Long userId);
 
@@ -446,6 +450,10 @@ public interface UserPermissionMapper {
 
     long countSuspiciousExpenses();
 
+    long countMonthEvents();
+
+    long countRegisteredMembers();
+
     int insertAuditLog(@Param("id") Long id,
                        @Param("bizType") String bizType,
                        @Param("bizId") Long bizId,
@@ -499,6 +507,8 @@ public interface UserPermissionMapper {
     EventMeta findEventMetaById(@Param("eventId") Long eventId);
 
     Long findEventIdByCheckinCode(@Param("checkinCode") String checkinCode);
+
+    Long findEventIdByCheckinCodeAndEventId(@Param("checkinCode") String checkinCode, @Param("eventId") Long eventId);
 
     int updateEventStatus(@Param("eventId") Long eventId, @Param("eventStatus") Integer eventStatus,
                           @Param("rejectReason") String rejectReason,
@@ -675,4 +685,59 @@ public interface UserPermissionMapper {
     BigDecimal sumTotalExpenseByYear(@Param("year") int year);
     List<FinanceStatisticsData.ClubFinanceItem> listClubFinanceSummary(@Param("year") int year);
     List<FinanceStatisticsData.MonthlyFinance> monthlyFinanceStatsByYear(@Param("year") int year);
+
+    // ===== Club Review (年审) =====
+
+    int insertClubReview(@Param("id") Long id, @Param("clubId") Long clubId,
+                         @Param("reviewYear") int reviewYear, @Param("reviewStatus") int reviewStatus,
+                         @Param("createdBy") Long createdBy, @Param("now") LocalDateTime now);
+
+    ClubReviewDetailData findClubReviewById(@Param("reviewId") Long reviewId);
+
+    ClubReviewDetailData findClubReviewByClubAndYear(@Param("clubId") Long clubId, @Param("reviewYear") int reviewYear);
+
+    int updateClubReviewSubmit(@Param("reviewId") Long reviewId, @Param("summaryText") String summaryText,
+                               @Param("attachmentUrl") String attachmentUrl, @Param("reviewStatus") int reviewStatus,
+                               @Param("totalIncome") BigDecimal totalIncome, @Param("totalExpense") BigDecimal totalExpense,
+                               @Param("balance") BigDecimal balance, @Param("memberCount") int memberCount,
+                               @Param("eventCount") int eventCount, @Param("updatedBy") Long updatedBy,
+                               @Param("now") LocalDateTime now);
+
+    int updateClubReviewDecision(@Param("reviewId") Long reviewId, @Param("reviewStatus") int reviewStatus,
+                                 @Param("score") BigDecimal score, @Param("rejectReason") String rejectReason,
+                                 @Param("reviewedBy") Long reviewedBy, @Param("now") LocalDateTime now);
+
+    List<ClubReviewItem> listClubReviewsByClub(@Param("clubId") Long clubId, @Param("offset") int offset,
+                                               @Param("pageSize") int pageSize);
+
+    long countClubReviewsByClub(@Param("clubId") Long clubId);
+
+    List<ClubReviewItem> listClubReviewsForApproval(@Param("reviewStatus") Integer reviewStatus,
+                                                     @Param("keyword") String keyword,
+                                                     @Param("offset") int offset, @Param("pageSize") int pageSize);
+
+    long countClubReviewsForApproval(@Param("reviewStatus") Integer reviewStatus, @Param("keyword") String keyword);
+
+    List<Long> listActiveClubIds();
+
+    int existsClubReview(@Param("clubId") Long clubId, @Param("reviewYear") int reviewYear);
+
+    java.util.Map<String, Object> findClubReviewRawRecord(@Param("clubId") Long clubId, @Param("reviewYear") int reviewYear);
+
+    int undeleteClubReview(@Param("reviewId") Long reviewId, @Param("updatedBy") Long updatedBy,
+                           @Param("now") LocalDateTime now);
+
+    int countClubEventsByYear(@Param("clubId") Long clubId, @Param("year") int year);
+
+    List<IncomeDetailData> listAllClubIncomesByYear(@Param("clubId") Long clubId, @Param("year") int year);
+
+    List<ExpenseDetailData> listAllClubExpensesByYear(@Param("clubId") Long clubId, @Param("year") int year);
+
+    List<ClubMemberItem> listAllClubMembers(@Param("clubId") Long clubId);
+
+    Integer findLatestReviewYear();
+
+    int countPendingReviewsByYear(@Param("reviewYear") int reviewYear);
+
+    int closeReviewWindow(@Param("reviewYear") int reviewYear, @Param("now") LocalDateTime now);
 }
